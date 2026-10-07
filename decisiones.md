@@ -1223,14 +1223,19 @@ herramienta de migraciones.
 
 ## 8. El gate a PROD: qué miro antes de aprobar
 
-**Evidencia:** la corrida `37668884076` (merge del PR #46, `d7b35ae`). Primero
-la **rechacé** con este comentario:
+**Evidencia:** la corrida `37668884076` (merge del PR #46, `d7b35ae`). Como
+re-corrí el job rechazado, la corrida tiene dos intentos: el 1 rechazado y el 2
+aprobado. Primero la **rechacé**
+([intento 1](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37668884076/attempts/1))
+con este comentario:
 
 > Rechazo: el PR #46 decide el entorno mirando el hostname (qa./prod.); si el
 > dominio cambia, PROD mostraría LOCAL y el aprobador perdería la señal visual.
 > Quiero confirmar primero en QA que el badge dice QA antes de autorizar PROD.
 
-Revisé QA, re-corrí el job y lo **aprobé** con:
+Revisé QA, re-corrí el job y lo **aprobé**
+([intento 2, el último](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37668884076))
+con:
 
 > Confirmé en QA: el badge dice QA y el pie muestra el SHA d7b35ae de esta
 > corrida. Smoke de QA verde. Apruebo el deploy a PROD.
