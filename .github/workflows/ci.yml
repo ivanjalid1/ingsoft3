@@ -174,62 +174,64 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Se despliega por IMAGEN: las que este mismo pipeline verificó y publicó
-      # como sha-<sha>. En el VPS no se reconstruye nada.
-      # El sha va EXPLÍCITO (nunca "la punta de la rama"): si entre el push y
-      # este paso alguien mergea otra cosa, QA igual recibe exactamente el commit
-      # que pasó las compuertas. Es el equivalente al &ref= del deploy hook de Render.
-      - name: Desplegar en QA el commit verificado (por SSH al VPS)
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          VPS_HOST: ${{ vars.VPS_HOST }}
-          VPS_KNOWN_HOSTS: ${{ vars.VPS_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          KEY="$RUNNER_TEMP/deploy_key"
-          KNOWN="$RUNNER_TEMP/known_hosts"
-          # La key se borra al salir pase lo que pase (éxito, error o cancelación).
-          trap 'rm -f "$KEY" "$KNOWN"' EXIT
-          ( umask 077; printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"; printf '%s\n' "$VPS_KNOWN_HOSTS" > "$KNOWN" )
-          # StrictHostKeyChecking=yes + known_hosts fijo: si el VPS no es el que
-          # esperamos, no se conecta (nada de "aceptar cualquier host").
-          # En el VPS la key tiene un forced command: lo ÚNICO que puede hacer es
-          # desplegar QA, y lo único que recibe es el sha (40 hex, validado allá).
-          ssh -i "$KEY" \
-            -o IdentitiesOnly=yes \
-            -o UserKnownHostsFile="$KNOWN" \
-            -o StrictHostKeyChecking=yes \
-            -o ConnectTimeout=20 \
-            tp6deploy@"$VPS_HOST" "$GITHUB_SHA"
+      # La acción compuesta vive en el repo: hay que bajarla primero. Alcanza con
+      # .github (sparse): este job no construye nada, solo despliega imágenes.
+      - name: Bajar la acción de despliegue
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github
 
-      # "up -d" terminado no significa "QA sirviendo ESTE commit". El smoke test
-      # pide que /api/health informe version == GITHUB_SHA: así cierra el hueco de
-      # dar verde contra la versión vieja que todavía estaba corriendo.
-      - name: Smoke test (espera a que QA conteste con ESTE commit)
-        shell: bash
-        env:
-          URL: https://qa.testingwebapp.site
-        run: |
-          for i in $(seq 1 30); do
-            HEALTH=""
-            VERSION=""
-            if HEALTH=$(curl -fsS --max-time 10 "$URL/api/health"); then
-              # Si no es JSON, VERSION queda vacía y cuenta como versión equivocada.
-              VERSION=$(jq -r '.version // empty' <<<"$HEALTH" 2>/dev/null || true)
-            fi
-            if [ -z "$HEALTH" ]; then
-              echo "[$i/30] /api/health no responde 200"
-            elif [ "$VERSION" != "$GITHUB_SHA" ]; then
-              echo "[$i/30] /api/health responde la versión '${VERSION:-?}', se espera $GITHUB_SHA"
-            elif ! curl -fsS --max-time 10 -o /dev/null "$URL/api/health/db"; then
-              echo "[$i/30] /api/health/db no responde 200 (la base o el esquema no están)"
-            elif ! curl -fsS --max-time 10 -o /dev/null "$URL/"; then
-              echo "[$i/30] / (frontend) no responde 200"
-            else
-              echo "QA sirve el commit $GITHUB_SHA: health, base y frontend OK"
-              exit 0
-            fi
-            sleep 20
-          done
-          echo "::error::Smoke test fallido: QA no quedó sirviendo el commit $GITHUB_SHA con health, base y frontend OK después de 30 intentos (~10 min)"
-          exit 1
+      # Despliegue + smoke test (ver .github/actions/deploy-vps/action.yml).
+      # El sha va EXPLÍCITO: QA recibe exactamente el commit que pasó las compuertas.
+      - name: Desplegar en QA el commit verificado y hacer smoke test
+        uses: ./.github/actions/deploy-vps
+        with:
+          url: https://qa.testingwebapp.site
+          sha: ${{ github.sha }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}     # la key del environment "qa"
+          host: ${{ vars.VPS_HOST }}
+          known-hosts: ${{ vars.VPS_KNOWN_HOSTS }}
+
+  # ---------------------------------------------------------------------------
+  # TP6 · Despliegue a PROD con aprobación manual.
+  # Sin "if" propio a propósito: needs: deploy-qa ya lo hereda. Si deploy-qa se
+  # saltea (PR) o falla (QA roto o smoke rojo), este job se saltea también; por
+  # defecto un job solo corre si TODOS sus needs terminaron en success. Así PROD
+  # solo recibe un commit que ya está sirviendo bien en QA.
+  # ---------------------------------------------------------------------------
+  deploy-prod:
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    # environment production: tiene "required reviewers", así que el workflow se
+    # PAUSA acá hasta que alguien autorizado apruebe en la pestaña Actions. Recién
+    # entonces el job arranca y recibe los secrets del entorno production (la key
+    # SSH de PROD no existe para ningún otro job ni entorno).
+    environment:
+      name: production
+      url: https://prod.testingwebapp.site
+    # concurrency: nunca dos despliegues a PROD solapados (el rollback usa el mismo
+    # grupo). cancel-in-progress: false = no se corta un deploy a la mitad.
+    # OJO: esto NO ordena la cola de aprobaciones. Si quedan pendientes las corridas
+    # A (vieja) y B (nueva), aprobar A después de B volvería a A: las corridas
+    # viejas se rechazan a mano.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Bajar la acción de despliegue
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github
+
+      # El sha es el de ESTA corrida (github.sha), no "lo último de main": aprobar
+      # la corrida A despliega A aunque mientras tanto se haya mergeado B.
+      - name: Desplegar en PROD el commit aprobado y hacer smoke test
+        uses: ./.github/actions/deploy-vps
+        with:
+          url: https://prod.testingwebapp.site
+          sha: ${{ github.sha }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}     # la key del environment "production": solo puede desplegar PROD
+          host: ${{ vars.VPS_HOST }}
+          known-hosts: ${{ vars.VPS_KNOWN_HOSTS }}
