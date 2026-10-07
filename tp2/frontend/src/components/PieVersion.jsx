@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { get } from '../api/client.js';
+import { entornoDesdeHostname } from '../utils/entorno.js';
 
 const VERSION_DESCONOCIDA = 'dev';
 
@@ -17,8 +18,11 @@ function versionCorta(datos) {
 // corriendo. Sirve para la demo del TP6: después de aprobar el deploy a PROD,
 // se recarga la página y el sha cambia frente a los ojos del que aprueba.
 // /api/health es público, así que se puede pedir sin sesión.
-export default function PieVersion() {
+// El badge del principio dice en qué entorno se está mirando (QA/PROD/LOCAL),
+// deducido del hostname. Se puede pasar `hostname` por prop (tests).
+export default function PieVersion({ hostname = window.location.hostname }) {
   const [version, setVersion] = useState('…');
+  const entorno = entornoDesdeHostname(hostname);
 
   useEffect(() => {
     let activo = true;
@@ -36,6 +40,12 @@ export default function PieVersion() {
 
   return (
     <footer className="pie-version">
+      <span
+        className={`pie-version__entorno pie-version__entorno--${entorno.toLowerCase()}`}
+        title="Entorno (según el hostname)"
+      >
+        {entorno}
+      </span>
       <span>ERP · TP6 · entorno de entrega continua</span>
       <span className="pie-version__sha mono" title="Versión desplegada (GET /api/health)">
         {version}
