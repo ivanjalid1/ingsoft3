@@ -28,7 +28,9 @@ describe('RutaProtegida', () => {
     expect(await screen.findByRole('heading', { name: /iniciar sesión/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
     // La pantalla protegida no llegó a montarse, así que nunca pidió datos.
-    expect(fetch).not.toHaveBeenCalled();
+    // La única llamada permitida es la del pie de versión (/api/health, público).
+    const rutasPedidas = fetch.mock.calls.map((llamada) => llamada[0]);
+    expect(rutasPedidas.filter((ruta) => ruta !== '/api/health')).toEqual([]);
   });
 
   it('deja pasar a /productos cuando hay token', async () => {
