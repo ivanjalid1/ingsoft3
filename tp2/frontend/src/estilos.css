@@ -686,3 +686,28 @@ tr.venta--anulada td {
   color: var(--color-primary);
   font-weight: 600;
 }
+
+/* Badge de entorno al principio del pie: QA ámbar, PROD verde, LOCAL gris. */
+.pie-version__entorno {
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.pie-version__entorno--qa {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+.pie-version__entorno--prod {
+  background: var(--color-ok-bg);
+  color: var(--color-ok);
+}
+
+.pie-version__entorno--local {
+  background: var(--color-bg);
+  color: var(--color-muted);
+}

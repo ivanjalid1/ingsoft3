@@ -56,4 +56,47 @@ describe('PieVersion', () => {
 
     expect(await screen.findByText('dev')).toBeInTheDocument();
   });
+  describe('badge de entorno', () => {
+    beforeEach(() => {
+      fetch.mockResolvedValue(respuesta(200, { status: 'ok', version: 'dev' }));
+    });
+
+    it('muestra "QA" con estilo de QA si el hostname empieza con "qa."', async () => {
+      render(<PieVersion hostname="qa.erp.example.com" />);
+
+      const badge = screen.getByText('QA');
+      expect(badge).toHaveClass('pie-version__entorno', 'pie-version__entorno--qa');
+      expect(await screen.findByText('dev')).toBeInTheDocument();
+    });
+
+    it('muestra "PROD" con estilo de PROD si el hostname empieza con "prod."', async () => {
+      render(<PieVersion hostname="prod.erp.example.com" />);
+
+      const badge = screen.getByText('PROD');
+      expect(badge).toHaveClass('pie-version__entorno', 'pie-version__entorno--prod');
+      expect(await screen.findByText('dev')).toBeInTheDocument();
+    });
+
+    it('muestra "LOCAL" para cualquier otro hostname', async () => {
+      render(<PieVersion hostname="localhost" />);
+
+      const badge = screen.getByText('LOCAL');
+      expect(badge).toHaveClass('pie-version__entorno', 'pie-version__entorno--local');
+      expect(await screen.findByText('dev')).toBeInTheDocument();
+    });
+
+    it('el badge va al principio del pie', async () => {
+      render(<PieVersion hostname="qa.erp.example.com" />);
+
+      expect(screen.getByRole('contentinfo').firstElementChild).toHaveTextContent('QA');
+      expect(await screen.findByText('dev')).toBeInTheDocument();
+    });
+
+    it('sin prop usa window.location.hostname (jsdom: localhost → LOCAL)', async () => {
+      render(<PieVersion />);
+
+      expect(screen.getByText('LOCAL')).toBeInTheDocument();
+      expect(await screen.findByText('dev')).toBeInTheDocument();
+    });
+  });
 });
