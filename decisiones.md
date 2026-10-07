@@ -1165,9 +1165,10 @@ Lo que queda, dicho honestamente:
   `up -d --wait`, y deja una línea en `deploy.log`. El `.env` de cada entorno
   vive sólo en el VPS (`chmod 600`), con contraseñas de base y `JWT_SECRET`
   distintos por entorno; nunca está en el repo.
-  Hoy el forced command es un bootstrap fijo que valida entorno y sha y ejecuta
-  `deploy/deploy.sh` de ese mismo sha; todo (bootstrap, `.env.example`, vhosts)
-  está en [`deploy/`](deploy/README.md), con el mapa de qué vive dónde.
+  El script está versionado en [`deploy/deploy.sh`](deploy/README.md) (junto
+  con un `.env.example`, el `authorized_keys` de ejemplo y los vhosts), pero el
+  VPS no se actualiza solo: si cambia, hay que reinstalarlo a mano (riesgo de
+  *drift*, documentado en `deploy/README.md`).
 - **Una acción compuesta para los tres usos.** `.github/actions/deploy-vps`
   (SSH + smoke test) la usan `deploy-qa`, `deploy-prod` y el rollback. Si
   cambio cómo se despliega, lo cambio en un solo lugar.
@@ -1354,12 +1355,14 @@ switch de blue-green es rápido pero a ciegas.
   `tp6prod`), para que una credencial filtrada no pueda salir de su entorno.
   Eso además permitiría mover la lógica del deploy al YAML del workflow sin
   necesitar una key sin restricciones.
-- **Alternativa descartada: toda la lógica en el YAML por SSH** (el job manda
-  los comandos de `docker compose`). La descarté porque exige una key que pueda
-  ejecutar cualquier cosa en una máquina compartida, con un usuario que equivale
-  a root. Con el comando forzado, la key sólo sabe desplegar su entorno; la
-  lógica igual queda versionada en `deploy/deploy.sh` (ver
-  [`deploy/README.md`](deploy/README.md)).
+- **Alternativas descartadas.** (a) **Toda la lógica en el YAML por SSH** (el
+  job manda los comandos de `docker compose`): exige una key que pueda ejecutar
+  cualquier cosa en una máquina compartida, con un usuario que equivale a root;
+  con la de QA se podría tocar PROD. (b) **Un bootstrap fijo que baje
+  `deploy.sh` del repo en cada sha**: resuelve el *drift*, pero agrega piezas
+  (descarga, fallback para commits viejos) a cambio de poco, para un script que
+  casi nunca cambia. Me quedé con el script único en el VPS, versionado en
+  [`deploy/`](deploy/README.md) y reinstalado a mano cuando cambia.
 - **Si el VPS desaparece, sobrevive casi todo:** el CI, las imágenes en ghcr, el
   `compose.yml`, los environments y el gate, el smoke y el workflow de rollback.
   Lo único que cambia es el destino del paso de deploy (host, key SSH y vhosts).
