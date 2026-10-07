@@ -9,8 +9,7 @@ decisión está en [`decisiones.md`](../decisiones.md) (sección TP6).
 | Archivo | Qué es |
 |---|---|
 | `compose.yml` | El stack (mysql + backend + frontend) por imagen `sha-<sha>`. `deploy.sh` lo baja **del mismo sha** que despliega. |
-| `bootstrap.sh` | El punto de entrada fijo del comando forzado. Instalado (a mano) como `/opt/ingsoft3-tp6/deploy.sh`. |
-| `deploy.sh` | La lógica del deploy. **No se instala**: el bootstrap la baja del mismo sha que despliega y la ejecuta. |
+| `deploy.sh` | Copia (fuente de verdad documentada) del script del comando forzado, instalado a mano en `/opt/ingsoft3-tp6/deploy.sh`. |
 | `.env.example` | Nombres de las variables del `.env` de cada entorno, con placeholders. |
 | `authorized_keys.example` | Las dos líneas con forced command (keys reemplazadas por placeholders). |
 | `nginx/*.conf` | Copias de los vhosts del host (las líneas SSL las maneja certbot). |
@@ -39,8 +38,8 @@ además pide aprobación). Y en el VPS cada key sólo puede ejecutar su entorno.
 
 | Ruta | Dueño / modo | En el repo |
 |---|---|---|
-| `/opt/ingsoft3-tp6/deploy.sh` | `root:root 755` | `deploy/bootstrap.sh` (ojo: nombre distinto) |
-| `/opt/ingsoft3-tp6/{qa,prod}/` | `tp6deploy 750` | — (ahí quedan `compose.yml`, `init.sql`, `deploy-run.sh` del último deploy y `deploy.log`) |
+| `/opt/ingsoft3-tp6/deploy.sh` | `root:root 755` | `deploy/deploy.sh` |
+| `/opt/ingsoft3-tp6/{qa,prod}/` | `tp6deploy 750` | — (ahí quedan `compose.yml`, `init.sql` y `deploy.log`) |
 | `/opt/ingsoft3-tp6/{qa,prod}/.env` | `tp6deploy 600` | sólo `deploy/.env.example` (**los valores nunca se versionan**) |
 | `/home/tp6deploy/.ssh/authorized_keys` | `tp6deploy 600` | `deploy/authorized_keys.example` |
 | `/etc/nginx/sites-available/{qa,prod}.testingwebapp.site.conf` | root | `deploy/nginx/` |
@@ -54,20 +53,22 @@ habría que agregar un token de sólo lectura (`read:packages`) en el VPS.
 
 ## El flujo
 
+El YAML (`ci.yml` / `rollback.yml`, vía `.github/actions/deploy-vps`) decide
+**cuándo**, **qué entorno** (por el environment de GitHub, que entrega la key) y
+**qué sha**, y se conecta por SSH. El script del VPS hace el resto. El forced
+command limita cada key a su entorno.
+
 ```
 merge a main
   └─ CI: tests → build → push ghcr.io/...:sha-<sha>   (backend y frontend)
       └─ deploy-qa (environment qa, key de QA)
           └─ ssh tp6deploy@VPS_HOST "<sha>"
-              └─ forced command: /opt/ingsoft3-tp6/deploy.sh qa      (= bootstrap.sh, fijo)
-                  ├─ valida entorno (qa|prod) y sha (40 hex)
-                  ├─ baja deploy/deploy.sh de raw.githubusercontent.com/.../<sha>
-                  │    (404 en commits viejos → lógica legacy embebida)
-                  └─ exec deploy.sh qa <sha>                       (versionado con el commit)
-                      ├─ baja compose.yml e init.sql del mismo <sha>
-                      ├─ IMAGE_TAG=<sha> docker compose -p tp6-qa pull
-                      ├─ docker compose up -d --wait
-                      └─ deploy.log: env=qa sha=<sha> exit=<rc>
+              └─ forced command: /opt/ingsoft3-tp6/deploy.sh qa
+                  ├─ valida sha (40 hex)
+                  ├─ baja compose.yml e init.sql de raw.githubusercontent.com/<sha>
+                  ├─ IMAGE_TAG=<sha> docker compose -p tp6-qa pull
+                  ├─ docker compose up -d --wait
+                  └─ deploy.log: env=qa sha=<sha> exit=<rc>
           └─ smoke: /api/health (version == sha), /api/health/db, /
       └─ deploy-prod (environment production: aprobación) → igual con deploy.sh prod
 ```
@@ -76,27 +77,20 @@ merge a main
 de un deploy bueno). Es el mismo despliegue apuntando a una imagen anterior; no
 revierte datos ni esquema.
 
-## Bootstrap fijo + script versionado (y por qué es seguro)
+## Riesgo de drift: el script del VPS no se actualiza solo
 
-El forced command apunta a un **bootstrap fijo** (`bootstrap.sh`) que no se
-actualiza desde el repo. Lo que garantiza, y que nadie puede cambiar empujando
-a `main`:
+`deploy/deploy.sh` es la copia documentada, pero el VPS **no** la toma sola del
+repo. Cada vez que cambie, hay que mergear y reinstalarla a mano:
 
-1. **key → entorno**: el entorno lo pone el forced command de `authorized_keys`,
-   no el cliente. Con la key de QA no se puede desplegar PROD.
-2. **la única entrada es un sha** de 40 hex; cualquier otra cosa sale con código 2.
+```bash
+scp deploy/deploy.sh root@VPS:/tmp/ &&   ssh root@VPS 'install -o root -g root -m 755 /tmp/deploy.sh /opt/ingsoft3-tp6/deploy.sh'
+```
 
-Todo lo demás (`deploy.sh`) lo baja **del mismo sha** que despliega. Esto no
-agrega confianza nueva: el repo en ese sha **ya** decide `compose.yml`, y quien
-controla el compose controla docker (que en la práctica es root en el host).
-Ese sha además es el que pasó los tests, la publicación de imágenes y, para
-PROD, la aprobación. A cambio, la lógica del deploy viaja con el commit: se
-cambia con un PR, y un **rollback también vuelve atrás el script**.
+Para verificar que no divergieron: `sha256sum` de los dos lados tiene que dar
+igual. `compose.yml` e `init.sql` no tienen este problema: se bajan del sha en
+cada deploy, así que un rollback usa los del commit al que vuelve.
 
-Commits anteriores a este cambio (p.ej. `v6.0.0` = `c231030`) no tienen
-`deploy/deploy.sh`: raw.githubusercontent responde 404 y el bootstrap usa la
-lógica original embebida (queda `bootstrap=legacy` en `deploy.log`). Cualquier
-otro error de descarga (red, 5xx) falla sin tocar nada.
+## Seguridad y alternativas
 
 **Lo que esto no resuelve (dicho honestamente):** `tp6deploy` está en el grupo
 `docker`, que en el host equivale a root: podría ver o parar los contenedores
@@ -108,18 +102,15 @@ producción, es Docker *rootless* con un usuario por entorno (`tp6qa`,
 también permitiría llevar la lógica al YAML del workflow sin una key sin
 restricciones.
 
-**Alternativa descartada:** poner toda la lógica en el YAML y mandarla por SSH.
-Exige una key que pueda ejecutar cualquier comando en una máquina compartida
-con un usuario equivalente a root; con el forced command, la key sólo sabe
-desplegar su entorno.
+**Alternativas consideradas y descartadas:**
 
-**Lo que sigue teniendo drift:** el bootstrap. Si cambia `deploy/bootstrap.sh`
-(debería ser raro), hay que reinstalarlo a mano:
-
-```bash
-scp deploy/bootstrap.sh <admin>@<vps>:/tmp/bootstrap.sh
-ssh <admin>@<vps> 'sudo install -o root -g root -m 755 /tmp/bootstrap.sh /opt/ingsoft3-tp6/deploy.sh'
-```
+- **Todos los comandos en el YAML**, mandados por SSH: el deploy quedaría
+  versionado con el commit, pero exige una key sin restricciones (una shell de
+  un usuario ≈ root) en una máquina compartida; con la key de QA se podría tocar
+  PROD. Con el forced command, cada key sólo sabe desplegar su entorno.
+- **Un bootstrap fijo que baje `deploy.sh` del repo en cada sha**: resuelve el
+  drift, pero agrega piezas (descarga, fallback para commits viejos que no
+  tienen el script) a cambio de poco, para un script que casi nunca cambia.
 
 ## Setup desde cero en un VPS nuevo
 
@@ -139,8 +130,8 @@ sudo install -d -o tp6deploy -g tp6deploy -m 750 /opt/ingsoft3-tp6/qa /opt/ingso
 sudo -u tp6deploy sh -c 'umask 077; cat > /opt/ingsoft3-tp6/qa/.env'     # pegar y Ctrl-D
 sudo -u tp6deploy sh -c 'umask 077; cat > /opt/ingsoft3-tp6/prod/.env'
 
-# 4. El bootstrap del comando forzado (deploy.sh NO se instala: se baja por sha)
-sudo install -o root -g root -m 755 deploy/bootstrap.sh /opt/ingsoft3-tp6/deploy.sh
+# 4. El script del comando forzado
+sudo install -o root -g root -m 755 deploy/deploy.sh /opt/ingsoft3-tp6/deploy.sh
 
 # 5. Dos keys (en una máquina local) y authorized_keys con forced command
 ssh-keygen -t ed25519 -N "" -C tp6-deploy-qa   -f tp6_qa
