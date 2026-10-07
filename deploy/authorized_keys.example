@@ -1,0 +1,5 @@
+# TP6 · Ejemplo de /home/tp6deploy/.ssh/authorized_keys (tp6deploy:tp6deploy, chmod 600; .ssh 700).
+# Cada key sólo puede ejecutar su forced command: con la de QA no se puede tocar PROD.
+# La parte privada de cada key es el secret DEPLOY_SSH_KEY del environment qa / production en GitHub.
+command="/opt/ingsoft3-tp6/deploy.sh qa",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA...<clave pública de QA> tp6-deploy-qa
+command="/opt/ingsoft3-tp6/deploy.sh prod",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA...<clave pública de PROD> tp6-deploy-prod

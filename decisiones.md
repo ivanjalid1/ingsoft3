@@ -1165,6 +1165,8 @@ Lo que queda, dicho honestamente:
   `up -d --wait`, y deja una línea en `deploy.log`. El `.env` de cada entorno
   vive sólo en el VPS (`chmod 600`), con contraseñas de base y `JWT_SECRET`
   distintos por entorno; nunca está en el repo.
+  El script, un `.env.example`, el `authorized_keys` de ejemplo y los vhosts
+  están versionados en [`deploy/`](deploy/README.md), con el mapa de qué vive dónde.
 - **Una acción compuesta para los tres usos.** `.github/actions/deploy-vps`
   (SSH + smoke test) la usan `deploy-qa`, `deploy-prod` y el rollback. Si
   cambio cómo se despliega, lo cambio en un solo lugar.
