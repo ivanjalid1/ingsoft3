@@ -1049,3 +1049,339 @@ IA. El mensaje exacto del gate (`ERROR: Coverage for lines (X%) does not meet
 global threshold (Y%)`, punto 6) lo vi en mi propia terminal antes de
 restaurar los archivos. La rama sin cubrir del punto 5 la elegí yo mirando la
 tabla de consola real, no un ejemplo que me haya sugerido la IA.
+
+---
+
+# Decisiones — TP6 (CD: environments, aprobaciones y deployment patterns)
+
+## Enlaces de este TP
+
+**Paquetes públicos (ghcr.io)** — tag `sha-<commit>`, se bajan sin login:
+
+- Backend: https://github.com/users/ivanjalid1/packages/container/package/ingsoft3-tp01-backend
+- Frontend: https://github.com/users/ivanjalid1/packages/container/package/ingsoft3-tp01-frontend
+
+```bash
+docker pull ghcr.io/ivanjalid1/ingsoft3-tp01-backend:sha-25e16885987878410d28d0187b488714f1e0c1e4
+```
+
+**Los dos eslabones de la cadena** (explicados en el punto 2):
+
+- PR #42, corrida de `pull_request`: *Entrar al registry* queda **skipped** y la
+  imagen sólo se construye —
+  https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37659563442/job/112923298988
+- Merge del PR #42 en `main` (`25e1688`): *Construir y publicar la imagen del
+  backend* es el último paso, después de los tests —
+  https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37660396718/job/112926134053
+
+**Entornos:**
+
+- QA: https://qa.testingwebapp.site
+- PROD: https://prod.testingwebapp.site
+
+En los dos, `/api/health` devuelve `{status, version}` con el SHA desplegado y
+`/api/health/db` hace un `SELECT` sobre una tabla real (503 si falta la base o el
+esquema).
+
+## 1. Dónde despliego y por qué no Render + Neon
+
+La guía asume Render para los contenedores y Neon (Postgres) para la base. Mi app
+usa **MySQL 8**: portar los modelos, el `init.sql` y los tests a Postgres para
+poder usar Neon era meter un cambio grande y riesgoso en la capa de datos sólo
+para acomodarme al proveedor, en un TP que es de entrega continua, no de base de
+datos. Elegí un **VPS propio** (un Ubuntu 24 de Hostinger, compartido con otros
+proyectos míos, con nginx y certbot en el host). La guía acepta cualquier
+proveedor que cumpla los cinco puntos del contrato; así los cumplo:
+
+| Punto del contrato | Cómo se cumple acá |
+|---|---|
+| 1. Dos entornos separados con URL pública | Dos proyectos de compose (`tp6-qa` y `tp6-prod`), cada uno detrás de su vhost de nginx con TLS de Let's Encrypt: `qa.` → `127.0.0.1:3610`, `prod.` → `127.0.0.1:3620`. |
+| 2. Una base por entorno | Un contenedor `mysql:8` por proyecto, con volumen propio (`tp6-qa_db_data`, `tp6-prod_db_data`) y contraseñas distintas. Prueba en el punto 7. |
+| 3. Front y back como contenedores de mis Dockerfiles | Las imágenes que corren son las que publica mi CI desde `tp2/backend` y `tp2/frontend`. El VPS no construye nada. |
+| 4. El deploy lo dispara mi pipeline con el commit verificado; auto-deploy del proveedor apagado | Acá no existe auto-deploy: lo único que despliega es el comando SSH forzado, y sólo lo invoca el pipeline con `github.sha` (punto 4). |
+| 5. PROD detrás de una aprobación | Environment `production` de GitHub con *required reviewer* (punto 8). |
+
+## 2. La cadena de tres eslabones: de commit verificado a imagen publicada
+
+1. **En el PR la imagen se construye pero no se publica.** El paso *Entrar al
+   registry* tiene `if: github.event_name == 'push' && github.ref ==
+   'refs/heads/main'` y el `build-push-action` tiene `push:` con la misma
+   condición. En la corrida del PR #42 se ve el login **skipped**: desde una rama
+   no hay credenciales para escribir en `ghcr.io`.
+2. **En `main` se publica sólo después de los tests.** En la corrida del merge
+   (`37660396718`) el orden de los pasos del job es tests → coverage → login →
+   *Construir y publicar*, que es el último. Si los tests fallan, el job corta
+   antes y no se publica nada.
+3. **El tag es el commit.** La imagen sale como `sha-<github.sha>`, y eso es lo
+   que después piden QA, PROD y el rollback. No hay `latest`.
+
+Juntos dicen: "si existe `sha-X` en el registry, es porque `X` pasó por `main`
+con los tests en verde".
+
+**Lo que la cadena no garantiza.** Nada me impide a mí, con un token con
+`write:packages`, hacer un `docker push` a mano con un tag `sha-X` que no salió
+del pipeline: la cadena es una convención del workflow, no una regla del
+registry. Y los **tags son mutables**: alguien con permisos puede reescribir
+`sha-X` apuntando a otra imagen. Lo inmutable sería desplegar por **digest**
+(`@sha256:...`); hoy despliego por tag y lo dejo explícito.
+
+## 3. Desplegar por imagen, no por rebuild
+
+Esta es la diferencia más importante con la guía. En Render el proveedor vuelve
+a construir desde el repo (el problema del §3.2: lo que corre no es exactamente
+lo que verificó el CI). Acá eso **no aplica**: el VPS hace `docker compose pull`
+de la imagen `sha-<commit>` que el CI construyó, testeó y publicó. Lo que corre
+en QA y en PROD es el mismo artefacto, byte a byte (por tag).
+
+Lo que queda, dicho honestamente:
+
+- El tag es mutable en teoría (punto 2); un digest lo cerraría del todo.
+- `mysql:8` es un tag flotante: si Docker Hub lo mueve, dos deploys del mismo
+  commit pueden bajar una base distinta. Fijarlo a una versión exacta (o digest)
+  sería lo correcto para producción real.
+- QA y PROD comparten máquina: si el VPS se cae, se caen los dos (punto 12).
+
+## 4. Cómo se despliega: environments, secrets y el comando forzado
+
+- **Dos environments en GitHub:** `qa` sin reglas y `production` con
+  *required reviewer* `ivanjalid1` (`prevent_self_review` apagado, porque soy el
+  único que puede aprobar).
+- **Un secret con el mismo nombre en los dos, con valor distinto.**
+  `DEPLOY_SSH_KEY` existe en `qa` y en `production`, pero son dos keys
+  diferentes. El job toma la del environment en el que corre, así que el YAML es
+  idéntico y aun así `deploy-qa` no puede tocar PROD. `VPS_HOST` y
+  `VPS_KNOWN_HOSTS` son variables del repo; la host key está fijada y el SSH usa
+  `StrictHostKeyChecking=yes`, así que no se acepta un host que no sea el mío.
+- **En el VPS, un usuario `tp6deploy` con comando forzado.** En
+  `authorized_keys` la key de QA sólo puede ejecutar
+  `/opt/ingsoft3-tp6/deploy.sh qa` y la de PROD sólo `deploy.sh prod`, sin
+  importar qué comando mande el cliente. El script acepta únicamente un SHA de
+  40 hex: lo probé mandando `ls /` y `not-a-sha` y los dos salieron con código 2.
+  Es el equivalente al *deploy hook* de Render con `&ref=`: una URL (acá una key)
+  que sólo sabe hacer una cosa, con un parámetro validado.
+- **Qué hace `deploy.sh`:** baja `deploy/compose.yml` y `init.sql` **de ese
+  mismo SHA** desde `raw.githubusercontent.com`, corre
+  `IMAGE_TAG=<sha> docker compose -p tp6-<env> --env-file .env pull` y después
+  `up -d --wait`, y deja una línea en `deploy.log`. El `.env` de cada entorno
+  vive sólo en el VPS (`chmod 600`), con contraseñas de base y `JWT_SECRET`
+  distintos por entorno; nunca está en el repo.
+- **Una acción compuesta para los tres usos.** `.github/actions/deploy-vps`
+  (SSH + smoke test) la usan `deploy-qa`, `deploy-prod` y el rollback. Si
+  cambio cómo se despliega, lo cambio en un solo lugar.
+- **La cadena de `needs`/`if`:** `deploy-qa` necesita los dos builds y tiene
+  `if` de push a `main`; `deploy-prod` necesita `deploy-qa` y no tiene `if`
+  propio — lo hereda, porque si `deploy-qa` se saltea, `deploy-prod` también.
+  `deploy-prod` (y el rollback) están en el grupo de `concurrency: deploy-prod`,
+  que evita dos deploys a PROD a la vez, **pero no ordena la cola de
+  aprobaciones**: si quedan dos corridas esperando, la vieja hay que rechazarla a
+  mano.
+
+## 5. Qué prueba el smoke test (y qué no)
+
+Después del deploy, hasta 30 intentos cada 20 s (`curl --max-time 10`):
+
+1. `/api/health` responde 200 **y** su `version` es igual al SHA que se acaba de
+   desplegar. Esto cierra el hueco del §3.3 de la guía: sin comparar la versión,
+   el smoke puede dar verde contra **la versión vieja** que todavía está
+   corriendo.
+2. `/api/health/db` responde 200: la base existe y el esquema está.
+3. `/` responde 200: el frontend sirve y nginx está bien configurado.
+
+**Lo que no prueba:** que los flujos funcionen (login, cargar una venta), la
+performance, ni que los datos sean correctos. Es un "está vivo y es la versión
+correcta", no un test funcional.
+
+## 6. Una imagen, dos entornos: qué va en la imagen y qué por variable
+
+El nginx del frontend dejó de tener la dirección del backend fija:
+`tp2/frontend/default.conf.template` usa `${BACKEND_URL}` y `${DNS_RESOLVER}`, y
+la imagen oficial de nginx los reemplaza al arrancar. Los defaults están en el
+Dockerfile (`backend:3000`, `127.0.0.11`), así que el `docker compose` local del
+TP2 sigue andando igual.
+
+- **En la imagen:** el `dist/` estático y el template.
+- **Por variable:** dirección del backend, resolver, credenciales de la base,
+  `JWT_SECRET` y `APP_VERSION`.
+
+La **misma imagen** corre en QA y en PROD. En este VPS los dos entornos usan
+`http://backend:3000`, porque cada proyecto de compose tiene su propia red; la
+variable igual hace falta para que la imagen no quede atada a una dirección
+(con otro proveedor el backend estaría en otra URL).
+
+## 7. Una base por entorno: la prueba
+
+Inserté un cliente `SOY PROD` (id 2) **sólo** en la base de `tp6-prod`, con
+`docker compose exec` contra ese proyecto. En QA la misma consulta devuelve 0
+filas: QA sólo tiene el `Cliente Demo` del `init.sql`. Los volúmenes son
+`tp6-qa_db_data` y `tp6-prod_db_data`.
+
+El esquema lo crea `init.sql`, montado en `docker-entrypoint-initdb.d`, que
+MySQL ejecuta **sólo la primera vez que arranca con el volumen vacío**. No hay
+migraciones, y lo digo como límite: el día que cambie el esquema, `init.sql` no
+se va a volver a correr sobre una base existente. Para eso hace falta una
+herramienta de migraciones.
+
+## 8. El gate a PROD: qué miro antes de aprobar
+
+**Evidencia:** la corrida `37668884076` (merge del PR #46, `d7b35ae`). Como
+re-corrí el job rechazado, la corrida tiene dos intentos: el 1 rechazado y el 2
+aprobado. Primero la **rechacé**
+([intento 1](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37668884076/attempts/1))
+con este comentario:
+
+> Rechazo: el PR #46 decide el entorno mirando el hostname (qa./prod.); si el
+> dominio cambia, PROD mostraría LOCAL y el aprobador perdería la señal visual.
+> Quiero confirmar primero en QA que el badge dice QA antes de autorizar PROD.
+
+Revisé QA, re-corrí el job y lo **aprobé**
+([intento 2, el último](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37668884076))
+con:
+
+> Confirmé en QA: el badge dice QA y el pie muestra el SHA d7b35ae de esta
+> corrida. Smoke de QA verde. Apruebo el deploy a PROD.
+
+**Qué miro antes de aprobar:**
+
+- Que la corrida de QA esté verde y que el smoke haya validado `version == sha`.
+- Qué cambia el PR: el diff, con atención especial a configuración, base de
+  datos, secrets y tests debilitados o borrados.
+- El cambio visible en QA (para eso están el pie con el SHA y el badge de
+  entorno).
+- Que no haya otra corrida más vieja esperando en la cola.
+- El momento: no aprobar un deploy si no voy a poder mirar PROD después.
+
+**Qué no puedo ver desde el gate:** el tráfico real de usuarios, errores o
+latencia en PROD (no hay monitoreo todavía; llega en el TP9), y si un cambio de
+base es reversible.
+
+## 9. Continuous Delivery, no Continuous Deployment
+
+Lo que implementé es **Continuous Delivery**: cada merge a `main` queda
+desplegado en QA y listo para PROD, pero a PROD entra sólo con una decisión
+humana. Para pasar a **Continuous Deployment** (sin gate) me faltan: tests e2e
+que prueben flujos reales, monitoreo y alertas, rollback automático ante errores
+y feature flags para separar "desplegado" de "activado". Sin eso, sacar el gate
+sería sacar la única red que hay.
+
+## 10. Release y rollback medido
+
+**Release:** `v6.0.0` sobre `c231030b79e243e3fdad46f793d7503402140e50`, con
+notas generadas: https://github.com/ivanjalid1/ingsoft3-tp01/releases/tag/v6.0.0.
+El SHA lo saqué de la API de Deployments (lo que **PROD tenía corriendo**), no
+de la punta de `main`, que puede estar adelante.
+
+**Rollback:** `.github/workflows/rollback.yml`, un `workflow_dispatch` que recibe
+un SHA. Corre en el environment `production`, así que **también pide
+aprobación**. Plan:
+
+1. Elegir el último SHA bueno (`git rev-list -n1 v6.0.0`).
+2. Disparar el workflow con ese SHA.
+3. El workflow valida que sea un SHA de 40 hex y que existan las dos imágenes
+   (`docker manifest inspect`): si el commit nunca pasó por `main`, corta.
+4. Aprobar.
+5. Despliega con la misma acción compuesta y el smoke exige que PROD conteste
+   **esa** versión.
+6. Escribe los segundos en el resumen de la corrida.
+
+**Medido** en https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37669622780,
+volviendo de `d7b35ae` (PR #46) a `c231030` (`v6.0.0`):
+
+| Momento | Hora (UTC) |
+|---|---|
+| Dispatch | 18:48:16 |
+| Aprobación / arranca el job | 18:49:59 |
+| Cronómetro INICIO | 18:50:01 |
+| `deploy.log` en el VPS: `env=prod sha=c231030… exit=0` | 18:50:27 |
+| Smoke verde / FIN | 18:50:29 |
+
+**28 s** desde la aprobación hasta PROD verificada en la versión anterior, y
+**2 min 15 s** de punta a punta incluyendo la espera humana. Hoy PROD sigue en
+`c231030` y QA en `d7b35ae`, que se puede comprobar en `/api/health` de cada uno.
+
+**Lo que el rollback no deshace:** los datos y el esquema. Si una versión nueva
+cambió tablas o escribió filas con otro formato, volver la imagen atrás no las
+vuelve. Para eso hacen falta migraciones compatibles hacia atrás
+(expand/contract: primero agregar, después dejar de usar, recién al final
+borrar) y un backup antes de cada deploy (un `mysqldump` del volumen de PROD).
+
+## 11. Qué patrón usaría en producción real
+
+Para esta app recomiendo **blue-green**:
+
+- **Costo:** es chica; duplicarla en el mismo VPS son dos proyectos de compose
+  más. No hace falta otra máquina.
+- **Riesgo y rollback:** el cambio de versión es cambiar el upstream de nginx de
+  `blue` a `green` y recargar. El rollback es lo mismo al revés: instantáneo, sin
+  bajar imágenes ni esperar arranques.
+- **La condición:** la base es **una sola**, compartida por blue y green, así que
+  todo cambio de esquema tiene que ser compatible hacia atrás (el mismo
+  expand/contract del punto 10).
+
+**Por qué no canary:** necesita volumen de tráfico para que el porcentaje que va
+a la versión nueva diga algo, y métricas por versión para comparar. No tengo
+ninguna de las dos. **Feature flags** los sumaría más adelante para features
+riesgosas, no como patrón de deploy.
+
+Cualquiera de estos patrones necesita observabilidad que hoy no hay: métricas por
+versión, tasa de errores, latencia, logs centralizados y alertas. Sin eso, el
+switch de blue-green es rápido pero a ciegas.
+
+## 12. Letra chica de la infraestructura (y seguridad)
+
+- **No hay free tier: es un VPS propio y compartido** con otros proyectos en
+  producción. Eso implica no hacer `docker system prune` a ciegas, competir por
+  CPU y memoria, y que fail2ban banea IPs que abren muchas conexiones SSH; lo
+  mitigué con **una sola conexión SSH por deploy**.
+- **No hay cold start:** los contenedores están siempre arriba
+  (`restart: unless-stopped`). Los reintentos del smoke cubren sobre todo el
+  `pull` de las imágenes y el primer arranque de MySQL con el volumen vacío.
+- Los certificados se renuevan solos con el timer de certbot; los registros DNS
+  `qa.` y `prod.testingwebapp.site` son registros A al VPS.
+- **Riesgo principal:** si el VPS muere, mueren QA y PROD juntos.
+- **Seguridad:** las keys de deploy están separadas por entorno y limitadas por
+  el comando forzado; los secrets nunca están en el repo; los paquetes son
+  públicos a propósito (no contienen secretos: todo lo sensible entra por
+  variable). Lo que digo honestamente: `tp6deploy` está en el grupo `docker`, y
+  en ese host eso equivale a root. Lo que lo limita es el comando forzado, no el
+  usuario.
+- **Si el VPS desaparece, sobrevive casi todo:** el CI, las imágenes en ghcr, el
+  `compose.yml`, los environments y el gate, el smoke y el workflow de rollback.
+  Lo único que cambia es el destino del paso de deploy (host, key SSH y vhosts).
+
+## 13. Problemas encontrados y cómo los resolví
+
+- **La app es MySQL y la guía asume Neon (Postgres).** Lo resolví cambiando de
+  proveedor en vez de cambiar de base (punto 1).
+- **El VPS es compartido.** nginx del host ya ocupaba 80/443, así que no pude
+  usar Caddy en un contenedor: usé vhosts de nginx en el host apuntando a puertos
+  sólo de `127.0.0.1`, y certbot para TLS.
+- **QA no resolvía en mi máquina** después de crear el registro DNS. Era el cache
+  DNS de Cloudflare WARP en mi máquina, no un problema del servidor: alcanzó con
+  esperar a que expirara.
+- **`npm run test:ci` no expande `${COVERAGE_DIR:-coverage}` en `cmd.exe`.** Es
+  sintaxis de shell POSIX; en el CI (Linux) anda bien, que es donde importa.
+- **Apreté *Approve* habiendo escrito un texto de rechazo.** En las corridas
+  `37665923884` y `37667927904` escribí comentarios de rechazo pero apreté
+  *Approve* (y uno de los primeros rechazos dice sólo "Test"). El historial de
+  aprobaciones lo muestra tal cual. La lección: el gate registra exactamente lo
+  que hizo el humano; **lo que decide es el botón, no el comentario**. En la
+  corrida `37668884076` lo hice bien: rechazo con motivo y después aprobación
+  con evidencia.
+
+## 14. Declaración de uso de IA
+
+**Qué hice con IA.** Usé Claude Code (Anthropic) como asistente para: analizar
+el repo contra la guía y decidir el proveedor, escribir los scripts de
+preparación del VPS (`deploy.sh`, usuario, `authorized_keys`, vhosts), el YAML
+de los workflows, la acción compuesta, los endpoints de health con sus tests, el
+template de nginx y este texto.
+
+**Qué NO hice con IA.** Las decisiones de aprobar o rechazar en el gate, y sus
+comentarios, fueron mías.
+
+**Cómo lo verifiqué.** Cada paso lo comprobé con corridas reales (los enlaces de
+arriba), con `curl` contra QA y PROD (`/api/health` y `/api/health/db`), con las
+pruebas negativas del comando forzado (`ls /` y `not-a-sha` rechazados con
+código 2), con la consulta de separación de bases y midiendo el rollback desde
+los logs (el resumen de la corrida y el `deploy.log` del VPS). Puedo explicar
+cada gate, cada secret y cada espera que hay entre un merge y PROD.
