@@ -1,0 +1,39 @@
+# Plantilla de nginx: la imagen oficial corre envsubst sobre /etc/nginx/templates/*.template
+# al arrancar y deja el resultado en /etc/nginx/conf.d/. Solo reemplaza variables que
+# EXISTEN en el entorno (BACKEND_URL, DNS_RESOLVER); las de nginx ($host, $uri, ...)
+# quedan intactas. Así la MISMA imagen sirve en local, en QA y en prod: lo único que
+# cambia entre entornos es a dónde apunta /api, y eso lo decide el entorno, no el build.
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Resolver explícito: con proxy_pass a una VARIABLE nginx resuelve el nombre en cada
+    # request (con caché de 10s) en vez de una sola vez al arrancar. Eso permite que nginx
+    # arranque aunque el backend todavía no exista y que siga al backend si cambia de IP
+    # al recrearse. 127.0.0.11 es el DNS interno de Docker (valor por defecto de la imagen).
+    resolver ${DNS_RESOLVER} valid=10s ipv6=off;
+
+    # SPA: cualquier ruta que no sea un archivo real cae en index.html,
+    # y React Router resuelve la navegación del lado del cliente.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Proxy inverso hacia el backend: mismo origen, sin CORS.
+    # BACKEND_URL va SIN path (ej. http://backend:3000): con proxy_pass a una variable
+    # sin parte de URI, nginx reenvía la URI original completa, o sea /api/x llega al
+    # backend como /api/x.
+    location /api/ {
+        set $backend_api ${BACKEND_URL};
+        proxy_pass $backend_api;
+        proxy_http_version 1.1;
+        # Sin "Host $host" a propósito: nginx manda por defecto el host del upstream,
+        # que es lo correcto si BACKEND_URL es https://otro-dominio (SNI + vhost).
+        proxy_ssl_server_name on;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

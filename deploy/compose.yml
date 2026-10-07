@@ -1,0 +1,91 @@
+# ============================================================================
+# Despliegue del ERP en el VPS (TP6 - Continuous Delivery)
+#
+# UN solo archivo para DOS entornos. El VPS lo baja de GitHub en el sha exacto
+# que se despliega y lo levanta con un nombre de proyecto distinto por entorno:
+#
+#   IMAGE_TAG=<sha> docker compose -p tp6-qa   --env-file .env -f compose.yml pull
+#   IMAGE_TAG=<sha> docker compose -p tp6-qa   --env-file .env -f compose.yml up -d --wait
+#   (idem con -p tp6-prod, en el directorio de prod y con su propio .env)
+#
+# - Los secretos (MYSQL_ROOT_PASSWORD, DB_PASSWORD, JWT_SECRET) y FRONT_PORT
+#   viven en un .env POR ENTORNO en el VPS. Nunca están en el repo: acá solo
+#   se referencian, y ${VAR:?} hace fallar el compose si falta alguno.
+# - Cada proyecto (-p) tiene sus propios contenedores, red y volumen
+#   (tp6-qa_db_data / tp6-prod_db_data) => cada entorno tiene SU base de datos.
+#   Por eso no hay container_name: lo arma compose con el nombre del proyecto.
+# - Se despliega por IMAGEN (la que CI verificó y publicó con tag sha-<sha>),
+#   no se reconstruye nada en el VPS.
+# - init.sql tiene que estar al lado de este archivo en el VPS (es la copia de
+#   tp2/backend/db/init.sql). MySQL lo corre solo la primera vez, con el
+#   volumen vacío.
+# - Nada publica puertos hacia afuera salvo el frontend, y solo en 127.0.0.1:
+#   el nginx del host termina TLS y le pasa el tráfico. El backend y la base
+#   solo se alcanzan por la red interna del proyecto.
+# ============================================================================
+
+services:
+  db:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?falta MYSQL_ROOT_PASSWORD en el .env}
+      # init.sql hace CREATE DATABASE erp / USE erp: el nombre tiene que coincidir
+      # para que erp_user reciba permisos sobre esa base.
+      MYSQL_DATABASE: erp
+      MYSQL_USER: erp_user
+      MYSQL_PASSWORD: ${DB_PASSWORD:?falta DB_PASSWORD en el .env}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      # Igual que en tp2/docker-compose.yml: -h 127.0.0.1 fuerza TCP, así el
+      # ping recién contesta cuando escucha el servidor definitivo (no el
+      # temporal que corre init.sql). $$ hace que la contraseña la expanda el
+      # shell DENTRO del contenedor y no quede escrita en la config del compose.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  backend:
+    image: ghcr.io/ivanjalid1/ingsoft3-tp01-backend:sha-${IMAGE_TAG:?falta IMAGE_TAG (sha a desplegar)}
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: erp_user
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: erp
+      JWT_SECRET: ${JWT_SECRET:?falta JWT_SECRET en el .env}
+      PORT: 3000
+      # Lo devuelve /api/health: el smoke test del pipeline compara contra el
+      # sha que mandó a desplegar, para no dar verde contra la versión vieja.
+      APP_VERSION: ${IMAGE_TAG}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # Con healthcheck, `up --wait` espera a que el backend conteste de verdad.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  frontend:
+    image: ghcr.io/ivanjalid1/ingsoft3-tp01-frontend:sha-${IMAGE_TAG}
+    environment:
+      # Leídas por la plantilla de nginx al arrancar (default.conf.template).
+      BACKEND_URL: http://backend:3000
+      DNS_RESOLVER: 127.0.0.11
+    ports:
+      # Solo loopback: lo expone el nginx del host (qa./prod.testingwebapp.site).
+      - "127.0.0.1:${FRONT_PORT:?falta FRONT_PORT en el .env}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  db_data:
