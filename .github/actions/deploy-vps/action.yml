@@ -1,0 +1,97 @@
+# ---------------------------------------------------------------------------
+# TP6 · Acción compuesta "desplegar un commit en el VPS y verificarlo".
+# La usan deploy-qa, deploy-prod (ci.yml) y rollback-prod (rollback.yml): los
+# tres hacen EXACTAMENTE lo mismo y solo cambian el entorno (que trae otra key
+# SSH) y la URL a verificar. Tenerlo en un solo lugar evita que las tres copias
+# se desincronicen (p.ej. arreglar el smoke de QA y olvidarse el de PROD).
+#
+# Qué entorno se toca NO lo decide esta acción: lo decide la key que recibe.
+# Cada environment de GitHub (qa / production) tiene su propio secret
+# DEPLOY_SSH_KEY, y en el VPS cada key tiene un forced command que solo puede
+# desplegar SU entorno. Con la key de QA es imposible tocar PROD, y viceversa.
+# ---------------------------------------------------------------------------
+name: Desplegar en el VPS
+description: Despliega por SSH las imágenes sha-<sha> ya publicadas y espera a que la URL sirva ese commit.
+
+inputs:
+  url:
+    description: URL pública del entorno a verificar (p.ej. https://qa.testingwebapp.site)
+    required: true
+  sha:
+    description: Commit a desplegar (40 hex). Debe tener sus imágenes sha-<sha> en ghcr.io.
+    required: true
+  ssh-key:
+    description: Key SSH privada del entorno (secrets.DEPLOY_SSH_KEY del environment)
+    required: true
+  host:
+    description: Host del VPS (vars.VPS_HOST)
+    required: true
+  known-hosts:
+    description: Línea(s) known_hosts fijas del VPS (vars.VPS_KNOWN_HOSTS)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Se despliega por IMAGEN: las que el pipeline verificó y publicó como
+    # sha-<sha>. En el VPS no se reconstruye nada.
+    # El sha va EXPLÍCITO (nunca "la punta de la rama"): si entre el push y este
+    # paso alguien mergea otra cosa, el entorno igual recibe exactamente el commit
+    # que pasó las compuertas. Es el equivalente al &ref= del deploy hook de Render.
+    - name: Desplegar el commit (por SSH al VPS)
+      shell: bash
+      env:
+        DEPLOY_SSH_KEY: ${{ inputs.ssh-key }}
+        VPS_HOST: ${{ inputs.host }}
+        VPS_KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        SHA: ${{ inputs.sha }}
+      run: |
+        set -euo pipefail
+        KEY="$RUNNER_TEMP/deploy_key"
+        KNOWN="$RUNNER_TEMP/known_hosts"
+        # La key se borra al salir pase lo que pase (éxito, error o cancelación).
+        trap 'rm -f "$KEY" "$KNOWN"' EXIT
+        ( umask 077; printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"; printf '%s\n' "$VPS_KNOWN_HOSTS" > "$KNOWN" )
+        # StrictHostKeyChecking=yes + known_hosts fijo: si el VPS no es el que
+        # esperamos, no se conecta (nada de "aceptar cualquier host").
+        # En el VPS la key tiene un forced command: lo ÚNICO que puede hacer es
+        # desplegar su entorno, y lo único que recibe es el sha (40 hex, validado allá).
+        ssh -i "$KEY" \
+          -o IdentitiesOnly=yes \
+          -o UserKnownHostsFile="$KNOWN" \
+          -o StrictHostKeyChecking=yes \
+          -o ConnectTimeout=20 \
+          tp6deploy@"$VPS_HOST" "$SHA"
+
+    # "up -d" terminado no significa "el entorno sirviendo ESTE commit". El smoke
+    # pide que /api/health informe version == sha: así cierra el hueco de dar
+    # verde contra la versión vieja que todavía estaba corriendo.
+    - name: Smoke test (espera a que el entorno conteste con ESTE commit)
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        SHA: ${{ inputs.sha }}
+      run: |
+        for i in $(seq 1 30); do
+          HEALTH=""
+          VERSION=""
+          if HEALTH=$(curl -fsS --max-time 10 "$URL/api/health"); then
+            # Si no es JSON, VERSION queda vacía y cuenta como versión equivocada.
+            VERSION=$(jq -r '.version // empty' <<<"$HEALTH" 2>/dev/null || true)
+          fi
+          if [ -z "$HEALTH" ]; then
+            echo "[$i/30] /api/health no responde 200"
+          elif [ "$VERSION" != "$SHA" ]; then
+            echo "[$i/30] /api/health responde la versión '${VERSION:-?}', se espera $SHA"
+          elif ! curl -fsS --max-time 10 -o /dev/null "$URL/api/health/db"; then
+            echo "[$i/30] /api/health/db no responde 200 (la base o el esquema no están)"
+          elif ! curl -fsS --max-time 10 -o /dev/null "$URL/"; then
+            echo "[$i/30] / (frontend) no responde 200"
+          else
+            echo "$URL sirve el commit $SHA: health, base y frontend OK"
+            exit 0
+          fi
+          sleep 20
+        done
+        echo "::error::Smoke test fallido: $URL no quedó sirviendo el commit $SHA con health, base y frontend OK después de 30 intentos (~10 min)"
+        exit 1

@@ -1,0 +1,86 @@
+# ---------------------------------------------------------------------------
+# TP6 · Rollback de PROD.
+# Rollback = volver a desplegar la imagen INMUTABLE de un commit que ya sabemos
+# bueno (sha-<sha> en ghcr.io). No se reconstruye nada ni se revierte código: es
+# el mismo despliegue de siempre apuntando a un sha anterior.
+# Lo que NO hace: deshacer cambios de datos ni de esquema. Si el deploy malo
+# migró la base, la versión vieja tiene que tolerar ese esquema (migraciones
+# compatibles hacia atrás) o hay que restaurar un backup aparte.
+# ---------------------------------------------------------------------------
+name: Rollback PROD
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "SHA completo (40 hex) del último deploy bueno, p.ej. git rev-list -n1 v6.0.0"
+        required: true
+        type: string
+
+jobs:
+  rollback-prod:
+    runs-on: ubuntu-latest
+    # Mismo environment que deploy-prod: también pide aprobación y usa la key de
+    # PROD (la única que puede desplegar PROD en el VPS).
+    environment:
+      name: production
+      url: https://prod.testingwebapp.site
+    # Mismo grupo que deploy-prod: un rollback nunca se pisa con un deploy en curso.
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # Antes de tocar PROD: el sha tiene que tener forma de sha y sus DOS imágenes
+      # tienen que existir. Si no, se falla acá y PROD queda como está.
+      # El input pasa por env (no se interpola en el script): evita inyección de comandos.
+      - name: Validar el sha y que existan sus imágenes
+        env:
+          SHA: ${{ inputs.sha }}
+          REPO: ghcr.io/ivanjalid1/ingsoft3-tp01
+        run: |
+          set -euo pipefail
+          # El job arranca recién después de la aprobación: este es el "t0".
+          INICIO=$(date +%s)
+          echo "INICIO=$INICIO" >> "$GITHUB_ENV"
+          echo "Inicio del rollback: $(date -u -d "@$INICIO" '+%Y-%m-%d %H:%M:%S UTC')"
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::'$SHA' no es un sha completo (40 hex en minúscula). Usá p.ej. git rev-list -n1 v6.0.0"
+            exit 1
+          fi
+          # Paquetes públicos: docker manifest inspect funciona sin login.
+          for APP in backend frontend; do
+            IMG="$REPO-$APP:sha-$SHA"
+            if docker manifest inspect "$IMG" > /dev/null; then
+              echo "OK: existe $IMG"
+            else
+              echo "::error::No existe $IMG: ese commit nunca se publicó (¿pasó por main?)"
+              exit 1
+            fi
+          done
+
+      - name: Bajar la acción de despliegue
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github
+
+      # Mismo despliegue + smoke que deploy-prod, pero con el sha del input: el
+      # smoke exige que /api/health informe version == ese sha.
+      - name: Desplegar en PROD el sha elegido y hacer smoke test
+        uses: ./.github/actions/deploy-vps
+        with:
+          url: https://prod.testingwebapp.site
+          sha: ${{ inputs.sha }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}     # la key del environment "production"
+          host: ${{ vars.VPS_HOST }}
+          known-hosts: ${{ vars.VPS_KNOWN_HOSTS }}
+
+      - name: Medir cuánto tardó el rollback
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          FIN=$(date +%s)
+          SEG=$((FIN - INICIO))
+          echo "Fin del rollback: $(date -u -d "@$FIN" '+%Y-%m-%d %H:%M:%S UTC') (${SEG} s)"
+          echo "### Rollback a $SHA: $SEG s desde el dispatch-aprobado hasta smoke verde" >> "$GITHUB_STEP_SUMMARY"
