@@ -1,30 +1,24 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# TP6 · Punto de entrada del deploy en el VPS (comando forzado de SSH).
+# TP6 · Lógica del deploy de un entorno en el VPS. Uso: deploy.sh <qa|prod> <sha>
 #
-# Instalado en: /opt/ingsoft3-tp6/deploy.sh  (root:root, modo 755)
-# Lo invoca SOLO el forced command de /home/tp6deploy/.ssh/authorized_keys
-# ("deploy.sh qa" con la key de QA, "deploy.sh prod" con la de PROD). El
-# cliente (el job de GitHub Actions) no elige el comando: lo único que manda es
-# el sha, que llega en $SSH_ORIGINAL_COMMAND y se valida acá (40 hex).
+# NO se instala en el VPS: lo baja el bootstrap (deploy/bootstrap.sh, instalado
+# como /opt/ingsoft3-tp6/deploy.sh y disparado por el forced command de SSH)
+# desde raw.githubusercontent.com/<repo>/<sha>/deploy/deploy.sh, o sea DE ESE
+# MISMO SHA que se despliega, y lo ejecuta como tp6deploy con "$ENV" "$SHA".
+# Por eso este script viaja con el commit: cambiarlo no requiere tocar el VPS,
+# y un rollback a un sha anterior corre también el script de ese sha.
 #
-# Esta copia del repo es la FUENTE DE VERDAD. El VPS no se actualiza solo (a
-# propósito: el comando forzado no debe ejecutar código bajado del repo como
-# punto de entrada). Si cambiás este archivo, reinstalalo a mano en el VPS:
-#
-#   scp deploy/deploy.sh <usuario>@<vps>:/tmp/deploy.sh     (o git pull allá)
-#   sudo install -o root -g root -m 755 /tmp/deploy.sh /opt/ingsoft3-tp6/deploy.sh
-#
-# Más contexto (qué vive dónde, setup desde cero): deploy/README.md
-# Fuera de estos comentarios, la lógica es idéntica byte a byte a la del VPS.
+# El bootstrap ya validó entorno y sha; acá se revalidan igual (defensa en
+# profundidad: el script no debe confiar en quién lo llama).
+# Más contexto: deploy/README.md
 # ---------------------------------------------------------------------------
-# Restricted deploy entrypoint (forced command). Usage: deploy.sh <qa|prod>, sha in $SSH_ORIGINAL_COMMAND
 set -euo pipefail
 ENV="${1:-}"
+SHA="${2:-}"
 case "$ENV" in qa|prod) ;; *) echo "ERROR: invalid env '$ENV' (expected qa|prod)" >&2; exit 2;; esac
-SHA="$(printf '%s' "${SSH_ORIGINAL_COMMAND:-}" | tr -d '[:space:]')"
 if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "ERROR: expected a 40-char lowercase hex commit sha, got '${SSH_ORIGINAL_COMMAND:-}'" >&2
+  echo "ERROR: expected a 40-char lowercase hex commit sha, got '$SHA'" >&2
   exit 2
 fi
 DIR=/opt/ingsoft3-tp6/$ENV
