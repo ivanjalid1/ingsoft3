@@ -98,6 +98,21 @@ Commits anteriores a este cambio (p.ej. `v6.0.0` = `c231030`) no tienen
 lógica original embebida (queda `bootstrap=legacy` en `deploy.log`). Cualquier
 otro error de descarga (red, 5xx) falla sin tocar nada.
 
+**Lo que esto no resuelve (dicho honestamente):** `tp6deploy` está en el grupo
+`docker`, que en el host equivale a root: podría ver o parar los contenedores
+de otros proyectos o montar `/` en un contenedor. La mitigación actual es el
+comando forzado (cada key → un solo entorno, la única entrada es un sha). El
+siguiente paso identificado, a propósito **no** hecho en este VPS compartido de
+producción, es Docker *rootless* con un usuario por entorno (`tp6qa`,
+`tp6prod`), para que una credencial filtrada no salga de su entorno; eso
+también permitiría llevar la lógica al YAML del workflow sin una key sin
+restricciones.
+
+**Alternativa descartada:** poner toda la lógica en el YAML y mandarla por SSH.
+Exige una key que pueda ejecutar cualquier comando en una máquina compartida
+con un usuario equivalente a root; con el forced command, la key sólo sabe
+desplegar su entorno.
+
 **Lo que sigue teniendo drift:** el bootstrap. Si cambia `deploy/bootstrap.sh`
 (debería ser raro), hay que reinstalarlo a mano:
 
