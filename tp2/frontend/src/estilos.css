@@ -658,3 +658,31 @@ tr.venta--anulada td {
     justify-self: stretch;
   }
 }
+
+/* ===== Pie de versión (TP6) =====
+   Fijo abajo a la derecha para que se vea igual en el login (pantalla
+   centrada) y en el shell con sidebar, sin tocar el layout de ninguno. */
+.pie-version {
+  position: fixed;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.65rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+.pie-version__sha {
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--color-tint);
+  color: var(--color-primary);
+  font-weight: 600;
+}
