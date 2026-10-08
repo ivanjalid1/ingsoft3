@@ -245,6 +245,21 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
+      # Antes de Playwright: si QA no responde desde ESTE runner, cortamos acá
+      # con un mensaje claro en vez de esperar timeouts de las pruebas. La IP
+      # pública del runner queda en el log para buscarla en los logs del VPS la
+      # próxima vez que haya un corte de red (corrida 37833222579).
+      - name: Comprobar que QA es alcanzable desde este runner
+        env:
+          BASE: https://qa.testingwebapp.site
+        run: |
+          echo "IP pública de este runner: $(curl -s --max-time 10 https://api.ipify.org || echo desconocida)"
+          if ! curl -sS --retry 5 --retry-all-errors --retry-delay 5 --max-time 10 \
+               -o /dev/null -w '%{http_code} %{time_total}s\n' "$BASE/api/health"; then
+            echo "::error::QA ($BASE/api/health) no es alcanzable desde este runner: corte de red entre GitHub y el VPS, no un fallo de las pruebas."
+            exit 1
+          fi
+
       - name: Pruebas de integración contra la API de QA
         env:
           API_BASE_URL: https://qa.testingwebapp.site
@@ -298,6 +313,20 @@ jobs:
       # proyecto definido en playwright.config.js.
       - name: Instalar Chromium para Playwright
         run: npx playwright install --with-deps chromium
+
+      # Igual que en integracion: si QA no responde desde ESTE runner, cortamos
+      # con un mensaje claro. La IP queda en el log para buscarla en los logs del
+      # VPS (en la corrida 37833222579 ningún request de este job llegó al VPS).
+      - name: Comprobar que QA es alcanzable desde este runner
+        env:
+          BASE: https://qa.testingwebapp.site
+        run: |
+          echo "IP pública de este runner: $(curl -s --max-time 10 https://api.ipify.org || echo desconocida)"
+          if ! curl -sS --retry 5 --retry-all-errors --retry-delay 5 --max-time 10 \
+               -o /dev/null -w '%{http_code} %{time_total}s\n' "$BASE/login"; then
+            echo "::error::QA ($BASE/login) no es alcanzable desde este runner: corte de red entre GitHub y el VPS, no un fallo de las pruebas."
+            exit 1
+          fi
 
       - name: Pruebas end-to-end en el navegador contra QA
         env:

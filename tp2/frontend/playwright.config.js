@@ -19,10 +19,18 @@ export default defineConfig({
   // "alta inválida" compara cantidades del listado. En paralelo, un alta de
   // otra prueba podría cambiar ese conteo en el medio (falso rojo).
   workers: 1,
-  retries: 1,
+  // Reintentos como guarda a nivel de RED (corrida 37833222579: el page.goto
+  // del runner a QA quedó colgado 60s sin que ningún request llegara al VPS;
+  // al re-correr pasó). No es por arranque en frío: en el VPS los contenedores
+  // están siempre prendidos. Ojo: una prueba que pasa solo en el reintento
+  // aparece como "flaky" en el reporte, y eso hay que mirarlo, no ignorarlo.
+  retries: process.env.CI ? 2 : 1,
   reporter: [['html', { open: 'never' }], ['list']],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://localhost:8080',
+    // Una navegación colgada falla en 20s en vez de comerse los 60s del test:
+    // así el reintento entra dentro del timeout y no se pierde todo el intento.
+    navigationTimeout: 20_000,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure'
   },
