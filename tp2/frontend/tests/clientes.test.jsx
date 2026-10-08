@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Clientes from '../src/pages/Clientes.jsx';
@@ -75,6 +75,17 @@ describe('Pantalla de clientes', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({
       nombre: 'Beto Gómez', email: 'beto@mail.com', telefono: '222'
     });
+  });
+
+  // Regresión TP7 (corrida 37839260057): el listado leía cliente.correo en vez de
+  // cliente.email y la celda quedaba vacía. La e2e lo detectó primero; este test
+  // lo atrapa también a nivel unitario.
+  it('muestra el email de cada cliente listado en su fila', async () => {
+    renderizarClientes();
+
+    const celdaNombre = await screen.findByRole('cell', { name: 'Ana Pérez' });
+    const fila = celdaNombre.closest('tr');
+    expect(within(fila).getByRole('cell', { name: 'ana@mail.com' })).toBeInTheDocument();
   });
 
   // Accesibilidad (TP7): con varias filas, "Dar de baja" a secas es ambiguo para
