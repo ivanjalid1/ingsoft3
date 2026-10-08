@@ -132,9 +132,12 @@ export default function Clientes() {
                     <td>{cliente.email}</td>
                     <td className="num">{cliente.telefono}</td>
                     <td>
+                      {/* aria-label con el nombre: en una tabla con N filas hay N botones
+                          "Dar de baja"; así cada uno dice a QUIÉN afecta (lector de
+                          pantalla y getByRole del e2e lo encuentran sin ambigüedad). */}
                       <div className="acciones-form">
-                        <button type="button" onClick={() => editar(cliente)}>Editar</button>
-                        <button type="button" className="btn--danger" onClick={() => darDeBaja(cliente.id)}>Dar de baja</button>
+                        <button type="button" aria-label={`Editar ${cliente.nombre}`} onClick={() => editar(cliente)}>Editar</button>
+                        <button type="button" className="btn--danger" aria-label={`Dar de baja ${cliente.nombre}`} onClick={() => darDeBaja(cliente.id)}>Dar de baja</button>
                       </div>
                     </td>
                   </tr>

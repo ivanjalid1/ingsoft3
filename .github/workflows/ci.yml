@@ -193,15 +193,151 @@ jobs:
           known-hosts: ${{ vars.VPS_KNOWN_HOSTS }}
 
   # ---------------------------------------------------------------------------
+  # TP7 · Pruebas contra QA como compuerta antes de PROD.
+  #
+  #   build-* → deploy-qa → integracion → e2e → deploy-prod (aprobación manual)
+  #
+  # Sin "if" propio: heredan el de deploy-qa por needs. En un PR quedan
+  # "skipped" (no hay QA nuevo que probar); en push a main corren contra el
+  # commit que deploy-qa acaba de dejar sirviendo (su smoke ya verificó que
+  # /api/health devuelve version == sha). Si cualquiera falla, la cadena se
+  # corta y PROD ni siquiera pide aprobación.
+  #
+  # Host único: el backend no se publica aparte, la API se alcanza por el mismo
+  # host del front en /api (proxy de nginx). Por eso API_BASE_URL y E2E_BASE_URL
+  # son la misma URL de QA.
+  #
+  # Usuario de prueba: e2e@erp.local existe SOLO en la base de QA (en PROD no).
+  # Usuario en vars.QA_E2E_USER y contraseña en secrets.QA_E2E_PASSWORD (nivel
+  # repositorio: estos jobs no usan environment porque no tocan el VPS).
+  #
+  # Diagnóstico rápido cuando algo se pone rojo:
+  #   | falla          | pasa           | dónde mirar                                        |
+  #   |----------------|----------------|----------------------------------------------------|
+  #   | deploy-qa      | —              | despliegue/smoke: el VPS, la imagen o /api/health  |
+  #   | integracion    | —              | API o base de QA (contrato HTTP, validaciones, BD) |
+  #   | e2e            | integracion    | la UI: front, labels/roles, flujo del navegador    |
+  #   | e2e e integr.  | deploy-qa      | algo común: login/usuario de prueba o datos de QA  |
+  # El reporte HTML de Playwright (con trace y screenshot del fallo) queda como
+  # artifact de cada job.
+  # ---------------------------------------------------------------------------
+  integracion:
+    runs-on: ubuntu-latest
+    needs: deploy-qa
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tp2/frontend
+    steps:
+      - name: Bajar el código al runner
+        uses: actions/checkout@v6
+
+      - name: Preparar Node 22 con cache de npm
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tp2/frontend/package-lock.json
+
+      # Sin navegador: la suite de integración usa solo el fixture `request`.
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Pruebas de integración contra la API de QA
+        env:
+          API_BASE_URL: https://qa.testingwebapp.site
+          QA_E2E_USER: ${{ vars.QA_E2E_USER }}
+          QA_E2E_PASSWORD: ${{ secrets.QA_E2E_PASSWORD }}
+          PLAYWRIGHT_JSON_OUTPUT_NAME: test-results/resultados.json
+        run: npx playwright test e2e/api.spec.js --reporter=list,html,json
+
+      - name: Resumen de integración
+        run: |
+          node -e "
+            const s = require('./test-results/resultados.json').stats;
+            console.log('### Integración contra QA');
+            console.log(\`\${s.expected} pasaron · \${s.flaky} flaky · \${s.unexpected} fallaron · \${s.skipped} salteadas\`);
+          " >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar reporte de Playwright (integración)
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-integracion
+          path: |
+            tp2/frontend/playwright-report
+            tp2/frontend/test-results
+          if-no-files-found: ignore
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: integracion
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: tp2/frontend
+    steps:
+      - name: Bajar el código al runner
+        uses: actions/checkout@v6
+
+      - name: Preparar Node 22 con cache de npm
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tp2/frontend/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Solo Chromium (+ las librerías del sistema que necesita): es el único
+      # proyecto definido en playwright.config.js.
+      - name: Instalar Chromium para Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Pruebas end-to-end en el navegador contra QA
+        env:
+          E2E_BASE_URL: https://qa.testingwebapp.site
+          API_BASE_URL: https://qa.testingwebapp.site
+          QA_E2E_USER: ${{ vars.QA_E2E_USER }}
+          QA_E2E_PASSWORD: ${{ secrets.QA_E2E_PASSWORD }}
+          PLAYWRIGHT_JSON_OUTPUT_NAME: test-results/resultados.json
+        run: npx playwright test e2e/clientes.spec.js --reporter=list,html,json
+
+      - name: Resumen de e2e
+        run: |
+          node -e "
+            const s = require('./test-results/resultados.json').stats;
+            console.log('### E2E en navegador contra QA');
+            console.log(\`\${s.expected} pasaron · \${s.flaky} flaky · \${s.unexpected} fallaron · \${s.skipped} salteadas\`);
+          " >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar reporte de Playwright (e2e)
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-e2e
+          path: |
+            tp2/frontend/playwright-report
+            tp2/frontend/test-results
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
   # TP6 · Despliegue a PROD con aprobación manual.
-  # Sin "if" propio a propósito: needs: deploy-qa ya lo hereda. Si deploy-qa se
-  # saltea (PR) o falla (QA roto o smoke rojo), este job se saltea también; por
-  # defecto un job solo corre si TODOS sus needs terminaron en success. Así PROD
-  # solo recibe un commit que ya está sirviendo bien en QA.
+  # Sin "if" propio a propósito: needs ya lo hereda. TP7: ahora depende de e2e
+  # (que a su vez depende de integracion → deploy-qa). Si cualquier eslabón se
+  # saltea (PR) o falla (QA roto, smoke rojo, integración o e2e en rojo), este
+  # job se saltea también; por defecto un job solo corre si TODOS sus needs
+  # terminaron en success. Así PROD solo recibe un commit que ya está sirviendo
+  # bien en QA y pasó las pruebas contra QA.
   # ---------------------------------------------------------------------------
   deploy-prod:
     runs-on: ubuntu-latest
-    needs: deploy-qa
+    needs: e2e
     # environment production: tiene "required reviewers", así que el workflow se
     # PAUSA acá hasta que alguien autorizado apruebe en la pestaña Actions. Recién
     # entonces el job arranca y recibe los secrets del entorno production (la key

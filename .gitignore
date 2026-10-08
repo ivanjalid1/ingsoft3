@@ -17,3 +17,8 @@ Thumbs.db
 
 # notas personales de estudio (no son parte de la entrega)
 defensa-*.md
+
+# reportes de Playwright (se publican como artifact en CI, no se versionan)
+playwright-report/
+test-results/
+blob-report/
