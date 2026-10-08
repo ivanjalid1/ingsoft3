@@ -129,7 +129,7 @@ export default function Clientes() {
                 {clientes.map((cliente) => (
                   <tr key={cliente.id}>
                     <td>{cliente.nombre}</td>
-                    <td>{cliente.email}</td>
+                    <td>{cliente.correo}</td>
                     <td className="num">{cliente.telefono}</td>
                     <td>
                       {/* aria-label con el nombre: en una tabla con N filas hay N botones
