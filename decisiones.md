@@ -1,3 +1,6 @@
+> **Enlaces rápidos:** [Enlaces del TP6](#enlaces-de-este-tp) · [Enlaces del TP7](#enlaces-del-tp7)
+> (cada TP tiene su bloque de enlaces al principio de su sección; las secciones están en orden, TP1 → TP7).
+
 # Decisiones — TP1
 
 ## 1. Por qué Git no pudo resolver el conflicto solo
@@ -1404,3 +1407,323 @@ pruebas negativas del comando forzado (`ls /` y `not-a-sha` rechazados con
 código 2), con la consulta de separación de bases y midiendo el rollback desde
 los logs (el resumen de la corrida y el `deploy.log` del VPS). Puedo explicar
 cada gate, cada secret y cada espera que hay entre un merge y PROD.
+
+---
+
+# Decisiones — TP7 (Contenedores en el pipeline + integración y e2e)
+
+## Enlaces del TP7
+
+**Paquetes públicos (ghcr.io).** La versión que corre en PROD (`v7.0.0`) tiene el tag
+`sha-b4630600d430e889a27473bec6cfd8674110b5a0` en los dos:
+
+- Backend: https://github.com/users/ivanjalid1/packages/container/package/ingsoft3-tp01-backend
+- Frontend: https://github.com/users/ivanjalid1/packages/container/package/ingsoft3-tp01-frontend
+
+```bash
+docker pull ghcr.io/ivanjalid1/ingsoft3-tp01-backend:sha-b4630600d430e889a27473bec6cfd8674110b5a0
+docker pull ghcr.io/ivanjalid1/ingsoft3-tp01-frontend:sha-b4630600d430e889a27473bec6cfd8674110b5a0
+```
+
+**La corrida roja (la e2e frena un bug real):**
+
+- Commit que rompió la app: el merge del PR #52,
+  [`fa921526c293a6c20d6482748465413a5076fa2f`](https://github.com/ivanjalid1/ingsoft3-tp01/commit/fa921526c293a6c20d6482748465413a5076fa2f).
+  Es un cambio de una línea en `tp2/frontend/src/pages/Clientes.jsx`:
+  `cliente.email` → `cliente.correo`.
+- Corrida: https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37839260057
+- Reporte de integración (verde, 3 passed):
+  https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37839260057/artifacts/11576727940
+- Reporte e2e (rojo, 1 failed / 2 passed):
+  https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37839260057/artifacts/11576853286
+
+  (GitHub sólo deja bajar artefactos con la sesión iniciada: sin login, esos
+  enlaces dan 404. Vencen el 2027-01-06.)
+
+**La corrida verde completa después del arreglo:** el merge del PR #53 (`b463060`),
+desde el build hasta PROD con aprobación:
+https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37840446131
+
+**Release:** https://github.com/ivanjalid1/ingsoft3-tp01/releases/tag/v7.0.0
+
+**Entornos:**
+
+- QA: https://qa.testingwebapp.site
+- PROD: https://prod.testingwebapp.site
+
+## 1. Build once, deploy many: ya estaba hecho desde el TP6
+
+La consigna 1 pide dejar de reconstruir en el proveedor y desplegar la imagen
+que construyó el CI. Eso lo tengo desde el TP6, porque a mi VPS despliego
+**por imagen** (punto 3 del TP6). `deploy-qa` y `deploy-prod` entran por SSH con
+la key de su environment (comando forzado). Después `deploy.sh` baja
+`deploy/compose.yml` de ese mismo sha y corre `IMAGE_TAG=<sha> docker compose pull`
+y `up -d --wait` con `ghcr.io/ivanjalid1/ingsoft3-tp01-{backend,frontend}:sha-<sha>`.
+No se reconstruye en ningún lado, y QA y PROD corren el mismo tag.
+
+Lo que es propio de Render no aplica acá: no hay *Existing Image*, ni URL de
+imagen que configurar, ni la trampa del *Manual Deploy* que vuelve a construir.
+No hay ningún proveedor que pueda construir por su cuenta.
+
+**Cómo se prueba desde afuera** (lo que en Render serían los *Events*):
+
+1. **El log del paso de deploy** en Actions muestra el `pull` de
+   `sha-<commit>` de las dos imágenes.
+2. **`/api/health` devuelve `{version: <commit>}`**, y el smoke test exige que
+   coincida con `github.sha`. Con eso queda implementado el concepto del §2.4
+   ("la app sabe qué versión es"), pero **a medias, y lo digo**: `APP_VERSION`
+   no está horneada en la imagen, la pone `deploy/compose.yml`
+   (`APP_VERSION: ${IMAGE_TAG}`). Por lo tanto prueba **qué tag se mandó a
+   desplegar**, no qué bits hay adentro de la imagen. Si la pasara con un `ARG`
+   en el build, la prueba sería más fuerte, porque la versión saldría de la
+   imagen misma.
+3. **En el VPS:** `/opt/ingsoft3-tp6/<env>/deploy.log` guarda una línea por
+   deploy con el sha y el código de salida, y
+   `docker compose -p tp6-qa images` muestra el tag que está corriendo.
+
+Por ejemplo, hoy PROD contesta `version: b4630600…` (`v7.0.0`) y QA contesta
+`51e774c…`, que es el merge del PR #54: está en QA pero no en PROD (punto 13).
+
+## 2. Estrategia de tags
+
+- **En el registry sólo hay `sha-<40 hex>`.** No publico `latest` porque es un tag
+  que se mueve solo: "desplegar `latest`" no dice qué versión corre y tampoco
+  deja volver atrás a algo concreto. Con el sha, la imagen y el commit son lo mismo.
+- **La versión legible va en Git.** El tag `v7.0.0` está sobre el commit que
+  corre en PROD. Para pasar de la versión a la imagen:
+  `git rev-list -n1 v7.0.0` → `b4630600d430e889a27473bec6cfd8674110b5a0` →
+  `sha-b4630600…` en los dos paquetes.
+- **Los tags del registry son mutables, el digest no.** Si re-corro una
+  corrida de `main`, se vuelve a publicar `sha-<commit>`: el código es el mismo, pero
+  la imagen puede ser otra. Desplegar por digest (`@sha256:…`) lo resolvería, pero
+  hay que pasar el digest del job de build a los de deploy. No lo hice; queda
+  como el siguiente paso.
+- **Dónde puse `v7.0.0` y por qué.** El commit lo saqué de la API de Deployments del
+  environment `production`, pero **no** del primer elemento: `.[0]` es el último
+  deployment **creado**, no el último **desplegado**. El más nuevo era
+  `51e774c` (la corrida del PR #54): está en estado `waiting` y nunca llegó a
+  PROD. Filtré por estado `success` y me quedó `b463060`, que es lo que PROD
+  tiene de verdad.
+
+## 3. Host único: el backend no se publica aparte
+
+El backend no tiene URL propia. A la API se llega por el mismo host del front, en
+`/api`: el template de nginx de la imagen del front le pasa el tráfico a
+`backend:3000` por la red del compose. Por eso en el pipeline
+`API_BASE_URL` = `E2E_BASE_URL` = `https://qa.testingwebapp.site`. Siguen siendo
+dos imágenes y dos paquetes. Lo único que cambia es por dónde entra el tráfico.
+
+## 4. La suite de integración (`tp2/frontend/e2e/api.spec.js`)
+
+Usa Playwright con `request`: HTTP directo, sin navegador y sin dobles, contra la
+API de QA y su MySQL real. Antes de arrancar se loguea con un usuario de prueba
+que existe **sólo en QA** (`e2e@erp.local`). El usuario está en la variable
+`QA_E2E_USER` y la contraseña en el secret `QA_E2E_PASSWORD`. Verifiqué que en la
+base de PROD ese usuario no existe (count 0).
+
+1. **Alta, lectura y baja.** Crea un cliente con un email único (lleva
+   `Date.now()`) y espera un 201 con sus datos y `activo: true`.
+   Un `GET /api/clientes` nuevo lo encuentra. `DELETE /api/clientes/:id`
+   devuelve `{id, activo: false}`. Después el cliente ya no está en el listado de activos
+   y `GET /api/clientes/:id` lo muestra con `activo: false`. Es así porque en la app
+   la baja es **lógica** (`UPDATE … SET activo = 0`) y no hay borrado
+   físico. El test verifica lo que la app hace de verdad.
+2. **Datos inválidos.** Con el nombre vacío responde 400 `DATOS_INVALIDOS` "El nombre es
+   obligatorio"; con el email mal formado, 400 `DATOS_INVALIDOS` "El email tiene
+   formato inválido". Además, en el listado **completo** (que incluye los inactivos) la
+   cantidad de filas no cambió.
+3. **Mi elección: email duplicado.** El segundo alta con el mismo email da
+   409 `EMAIL_DUPLICADO` y queda **una sola fila** con ese email. Lo elegí porque
+   es la única regla que garantiza la **base** y no el código. El service hace
+   una consulta previa para responder un 409 prolijo, pero lo que lo garantiza de verdad es el
+   `UNIQUE` de `clientes.email` (si dos altas entran a la vez, el service traduce
+   `ER_DUP_ENTRY` a 409). En los unitarios la base es un mock que acepta
+   cualquier cosa. Sólo contra MySQL real se ve que la respuesta es 409 y no
+   500, y que no se duplicó nada. La baja del cliente va en un `finally` para
+   que no quede activo aunque falle una aserción del medio.
+
+## 5. La suite e2e (`tp2/frontend/e2e/clientes.spec.js`)
+
+Es Chromium real contra QA. Cada prueba arranca logueándose **por la UI**. Al
+entrar a Clientes espera la respuesta real del `GET /api/clientes`: si no, un
+"no aparece" podría pasar contra una tabla que todavía está vacía.
+
+1. **Crear un cliente.** Completa el formulario y aparece la fila con el nombre
+   **y** el email. El formulario se limpia, lo da de baja y la fila desaparece.
+2. **Datos inválidos.** Con un email mal formado, el usuario ve un
+   `role=alert` que dice "El email tiene formato inválido" y no aparece ninguna fila.
+   Además confirma contra la API (en el listado completo) que no se creó nada.
+3. **Flujo diario.** Crea un cliente, recarga la página y el cliente sigue ahí: sale de la
+   base, no de la memoria de React. Lo da de baja, recarga otra vez y ya no
+   está.
+
+**Decisiones de la suite:**
+
+- **Selectores por accesibilidad:** `getByLabel` y `getByRole`, nunca clases
+  CSS ni ids. Para apuntar al botón de baja de **ese** cliente,
+  le agregué a la app nombres accesibles por fila ("Dar de baja <nombre>",
+  "Editar <nombre>"). Es una mejora real de accesibilidad: antes, un lector de
+  pantalla leía "Dar de baja" diez veces sin decir de quién era cada botón.
+- **`afterEach` de limpieza.** Si una prueba falla entre el alta y la baja, lo
+  que haya quedado activo se da de baja por la API.
+- **`workers: 1`.** Todas las pruebas comparten la misma base real, y la de
+  datos inválidos compara cantidades. En paralelo, el alta de otra prueba podría
+  cambiar el conteo en el medio y dar un rojo falso.
+
+## 6. Qué NO puse en cada suite (la pirámide)
+
+- Las validaciones campo por campo y las reglas de negocio (ventas, stock)
+  se quedan en los unitarios del TP5, que son rápidos y no necesitan un entorno.
+- En integración puse sólo lo que pasa **donde el código toca la base**: el
+  contrato HTTP real, la persistencia y el `UNIQUE`.
+- En e2e puse sólo los **flujos críticos** de un usuario. Son tres pruebas, no treinta,
+  porque cada una es lenta, depende de la red y comparte QA.
+
+## 7. Integración "amplia" contra QA, no "estrecha"
+
+Elegí probar contra QA ya desplegado en vez de levantar backend + MySQL dentro
+del runner.
+
+- **Lo que gano:** se prueban el deploy real, el proxy de nginx y la MySQL de
+  verdad, sin infraestructura extra en el CI.
+- **Lo que pierdo:** antes hace falta un deploy, así que el feedback llega más tarde. Además
+  comparte QA con otras corridas (punto 11) y depende de la red entre GitHub y
+  el VPS, que ya me falló (punto 10).
+
+## 8. La cadena del pipeline
+
+`build-backend` + `build-frontend` → `deploy-qa` (smoke: `version == sha`,
+`/api/health/db` y `/`) → `integracion` (`needs: deploy-qa`) → `e2e`
+(`needs: integracion`) → `deploy-prod` (`needs: e2e`, environment `production`
+con *required reviewer*, `concurrency: deploy-prod`).
+
+No hay `continue-on-error`, ni `|| true`, ni `always()`. Lo único que lleva
+`!cancelled()` son las subidas de reportes, porque el reporte hace falta justamente
+cuando la suite falla. Cada suite sube su propio artefacto
+(`playwright-report-integracion` / `playwright-report-e2e`) y escribe en el
+resumen de la corrida cuántas pruebas pasaron.
+
+## 9. La corrida roja: un bug real que frenó la e2e
+
+**El bug.** En el PR #52 cambié una línea del listado de Clientes:
+`cliente.email` → `cliente.correo`. La API sigue mandando `email`, así que la
+columna Email queda vacía. El ejemplo de la guía (mandar `correo` en vez de
+`email` en el alta) no me servía: ya hay un unitario que verifica el body exacto
+del POST, y lo habría atrapado antes. Por eso rompí el lado de **lectura**.
+
+**Qué pasó en la corrida `37839260057`:**
+
+| Job | Resultado |
+|---|---|
+| Builds + unitarios | verde (ningún unitario miraba la celda del email) |
+| `deploy-qa` + smoke | verde |
+| `integracion` | verde, 3 passed |
+| `e2e` | **rojo**, 1 failed / 2 passed |
+| `deploy-prod` | **skipped**: ni siquiera llegó a pedir aprobación |
+
+Falló "crear un cliente…" en la línea
+`expect(fila.getByRole('cell', { name: datos.email, exact: true })).toBeVisible()`:
+la fila estaba, pero la celda con el email no.
+
+**Diagnóstico con la tabla del §2.5:** integración verde + e2e roja quiere decir que la API y
+la base andan (la integración leyó el `email` directo de la API y estaba bien), y
+que el problema está en cómo el front usa esos datos. **No es un flaky:** falló en
+los tres intentos (el original y los dos reintentos), siempre en la misma
+aserción.
+
+**El arreglo (PR #53)** volvió a `cliente.email` y además **agregó un unitario de
+Vitest** que verifica la celda del email en la fila. La e2e encontró un hueco en
+los unitarios, y ese hueco se cerró más abajo en la pirámide, donde es
+más barato. Comprobé que el test nuevo falla con el código roto. Después, la corrida
+`37840446131` quedó verde de punta a punta, hasta PROD.
+
+## 10. Flaky tests, cold start y la red
+
+**Un flaky test** es uno que a veces pasa y a veces falla con el mismo código.
+Es peor que no tener test: la gente se acostumbra a re-correr hasta que dé
+verde, y el día que el rojo es real también lo re-corre. Un test que no existe,
+por lo menos, no enseña a ignorar el rojo.
+
+**Cold start no hay:** en el VPS los contenedores están siempre arriba. Lo que
+sí tuve fueron **cortes de red transitorios** entre algunos runners de GitHub
+(Azure) y el VPS:
+
+- En la corrida `37833222579`, el `page.goto` de la e2e quedó colgado unos 7 minutos
+  (status -1, ningún request llegó al nginx del VPS), mientras que la integración,
+  desde otro runner, ya había pasado. Al re-correr, pasó.
+- En las corridas `37677961855` y `37840446131` (primer intento), el SSH del deploy dio
+  `Connection timed out`, y en el firewall del VPS no quedó registrado ningún descarte.
+
+**Mitigaciones:**
+
+- `navigationTimeout: 20s`: una navegación colgada falla rápido, y el reintento
+  entra dentro del timeout del test.
+- `retries: 2` en CI. Una prueba que pasa sólo en el reintento aparece como
+  **flaky** en el reporte, y eso hay que mirarlo, no ignorarlo.
+- Un paso previo (PR #51) que muestra la IP del runner y le hace un `curl` con
+  reintentos a QA. Si QA no responde, corta con un mensaje que aclara que
+  es la red y no las pruebas, y la IP queda en el log para buscarla en los logs del VPS.
+- El SSH del deploy se reintenta **sólo ante un exit 255** (error de conexión de
+  SSH), desde el PR #54. Es seguro porque el deploy es idempotente y el comando
+  forzado sólo acepta un sha: repetirlo no puede hacer nada distinto.
+
+## 11. QA compartido: el límite conocido
+
+Dos corridas pueden pisarse en QA: una despliega mientras la otra está
+corriendo la e2e. Me pasó con dos corridas de `main` para el mismo commit
+(#67 y #68), y cancelé la duplicada. La regla que sigo hoy es **un merge a la vez**;
+las corridas viejas que quedan esperando aprobación las rechazo a mano. El
+arreglo de verdad sería un entorno efímero por corrida.
+
+## 12. La misma imagen del front en QA y PROD
+
+Es igual que en el TP6: el template de nginx toma `BACKEND_URL` y `DNS_RESOLVER`
+del entorno. **En la imagen** van el `dist/` estático y el template. **Por
+entorno** van la dirección del backend, las credenciales de la base, el
+`JWT_SECRET` y el `APP_VERSION`.
+
+## 13. El gate en este TP
+
+- **Rechacé** la corrida `37838244892` (PR #51) con este motivo:
+
+  > Solo cambia la configuración de las pruebas (timeouts, reintentos y chequeo
+  > de red); la imagen de la app es igual a la que ya está en PROD. No hay nada
+  > nuevo que promover.
+
+- **Aprobé** `37833222579` (después de re-correr por el corte de red, aclarando en
+  el comentario que el primer intento falló por la red y no por la app) y
+  `37840446131` (el arreglo del bug).
+- **`37841788683` (PR #54, el reintento del SSH) sigue esperando aprobación**, y
+  la voy a rechazar por el mismo motivo que la del PR #51: es un cambio sólo de
+  CI, y prefiero que PROD siga en `v7.0.0`. En QA sí está desplegado.
+
+**Lo que el gate (con estas suites) no atrapa:** los flujos que no cubren las tres
+e2e, las regresiones visuales o de layout, la performance, los problemas de migración de
+datos, la configuración que sólo existe en PROD (su `.env`) y la concurrencia.
+
+## 14. Riesgos que dejo anotados
+
+- **El admin de PROD usa las credenciales del seed**, que son públicas en
+  `init.sql`. En una producción real las rotaría; decidí no cambiarlas ahora.
+- **Un cliente dado de baja conserva su email bajo el `UNIQUE`**, así que no se puede
+  dar de alta otro cliente con ese email. Es una decisión de producto,
+  no un bug de los tests.
+- **Los datos de prueba se acumulan en QA** como filas inactivas, una por cada
+  alta de cada corrida.
+- **Si cambio de proveedor**, sobrevive todo menos el destino del deploy: la
+  acción `deploy-vps` (SSH), `deploy.sh` y los vhosts.
+
+## 15. Declaración de uso de IA
+
+**Qué hice con IA.** Usé Claude Code (Anthropic) como asistente para escribir
+las dos specs de Playwright y los jobs `integracion` y `e2e` del workflow, para el
+diagnóstico de los cortes de red entre los runners y el VPS, y para este texto.
+
+**Qué NO hice con IA.** Las decisiones de aprobar o rechazar en el gate, y sus
+comentarios, fueron mías.
+
+**Cómo lo verifiqué.** Con corridas reales (enlazadas arriba). La roja la
+reproduje con un cambio real en la app, no con un test forzado a fallar. Revisé
+los dos reportes de esa corrida, y antes de dar por bueno el unitario nuevo del
+PR #53 comprobé que falla con el código roto. Además, `/api/health` de QA y PROD
+devuelve los shas que menciono arriba.
