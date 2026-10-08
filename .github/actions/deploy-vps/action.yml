@@ -56,12 +56,50 @@ runs:
         # esperamos, no se conecta (nada de "aceptar cualquier host").
         # En el VPS la key tiene un forced command: lo ÚNICO que puede hacer es
         # desplegar su entorno, y lo único que recibe es el sha (40 hex, validado allá).
-        ssh -i "$KEY" \
-          -o IdentitiesOnly=yes \
-          -o UserKnownHostsFile="$KNOWN" \
-          -o StrictHostKeyChecking=yes \
-          -o ConnectTimeout=20 \
-          tp6deploy@"$VPS_HOST" "$SHA"
+        #
+        # TP7 · Reintentos de la conexión SSH. Dos veces (runs 37677961855 y
+        # 37840446131) el runner no llegó al puerto 22 ("Connection timed out")
+        # sin que el VPS registrara ningún drop y con otros runners conectando
+        # bien minutos antes y después: corte de red transitorio entre algunas
+        # IPs de runners de Azure y el VPS. Por eso se reintenta SOLO la conexión.
+        #
+        # Por qué es seguro reintentar:
+        #  - El deploy es idempotente: con el mismo sha, compose pull/up converge
+        #    siempre al mismo estado. Aunque un intento se haya cortado a mitad
+        #    de camino ya dentro del VPS, repetirlo deja el entorno igual.
+        #  - El forced command de la key solo acepta el sha: reintentar no puede
+        #    ejecutar otra cosa ni tocar otro entorno.
+        #
+        # Solo se reintenta si ssh sale con 255 (falla a nivel de conexión:
+        # timeout, conexión rechazada/cortada). Cualquier otro código viene del
+        # deploy remoto (p.ej. 2 = sha inválido, o un error de compose) y se
+        # falla en el acto: reintentar no lo arreglaría y taparía el error real.
+        echo "IP pública del runner: $(curl -s --max-time 10 https://api.ipify.org || echo desconocida)"
+        MAX_INTENTOS=4
+        for intento in $(seq 1 "$MAX_INTENTOS"); do
+          echo "Conexión SSH al VPS: intento $intento/$MAX_INTENTOS"
+          rc=0
+          ssh -i "$KEY" \
+            -o IdentitiesOnly=yes \
+            -o UserKnownHostsFile="$KNOWN" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            tp6deploy@"$VPS_HOST" "$SHA" || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$rc" -ne 255 ]; then
+            echo "::error::El deploy remoto falló con código $rc (no es un error de conexión): no se reintenta"
+            exit "$rc"
+          fi
+          if [ "$intento" -lt "$MAX_INTENTOS" ]; then
+            espera=$((intento * 10))  # backoff 10s / 20s / 30s
+            echo "::warning::ssh salió con 255 (falla de conexión) en el intento $intento/$MAX_INTENTOS; se reintenta en ${espera}s"
+            sleep "$espera"
+          fi
+        done
+        echo "::error::No se pudo conectar por SSH al VPS después de $MAX_INTENTOS intentos"
+        exit 255
 
     # "up -d" terminado no significa "el entorno sirviendo ESTE commit". El smoke
     # pide que /api/health informe version == sha: así cierra el hueco de dar
