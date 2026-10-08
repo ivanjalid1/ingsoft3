@@ -76,4 +76,19 @@ describe('Pantalla de clientes', () => {
       nombre: 'Beto Gómez', email: 'beto@mail.com', telefono: '222'
     });
   });
+
+  // Accesibilidad (TP7): con varias filas, "Dar de baja" a secas es ambiguo para
+  // un lector de pantalla y para un test e2e. Cada botón nombra a SU cliente.
+  it('cada fila tiene botones con nombre accesible propio y dar de baja pega al cliente correcto', async () => {
+    const usuario = userEvent.setup();
+    renderizarClientes();
+
+    expect(await screen.findByRole('button', { name: 'Editar Ana Pérez' })).toBeInTheDocument();
+    await usuario.click(screen.getByRole('button', { name: 'Dar de baja Ana Pérez' }));
+
+    // 1 = GET inicial, 2 = DELETE, 3 = GET de recarga del listado.
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.mock.calls[1][0]).toBe('/api/clientes/1');
+    expect(fetch.mock.calls[1][1].method).toBe('DELETE');
+  });
 });
