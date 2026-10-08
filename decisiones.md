@@ -1481,8 +1481,9 @@ No hay ningún proveedor que pueda construir por su cuenta.
    deploy con el sha y el código de salida, y
    `docker compose -p tp6-qa images` muestra el tag que está corriendo.
 
-Por ejemplo, hoy PROD contesta `version: b4630600…` (`v7.0.0`) y QA contesta
-`51e774c…`, que es el merge del PR #54: está en QA pero no en PROD (punto 13).
+Por ejemplo, hoy PROD contesta `version: b4630600…` (`v7.0.0`, después del
+rollback del punto 13) y QA contesta `646acc2…`, que es el merge del PR #55
+(sólo documentación): está en QA pero no en PROD.
 
 ## 2. Estrategia de tags
 
@@ -1500,10 +1501,13 @@ Por ejemplo, hoy PROD contesta `version: b4630600…` (`v7.0.0`) y QA contesta
   como el siguiente paso.
 - **Dónde puse `v7.0.0` y por qué.** El commit lo saqué de la API de Deployments del
   environment `production`, pero **no** del primer elemento: `.[0]` es el último
-  deployment **creado**, no el último **desplegado**. El más nuevo era
-  `51e774c` (la corrida del PR #54): está en estado `waiting` y nunca llegó a
-  PROD. Filtré por estado `success` y me quedó `b463060`, que es lo que PROD
-  tiene de verdad.
+  deployment **creado**, no el último **desplegado**. En ese momento el más nuevo
+  era `51e774c` (la corrida del PR #54), en estado `waiting`. Filtré por estado
+  `success` y me quedó `b463060`, que era lo que PROD tenía de verdad.
+  (Después esa corrida se aprobó por error y hubo que hacer rollback, punto 13.
+  El deployment del rollback quedó registrado con el sha del workflow,
+  `646acc2`, no con el de la imagen que desplegó; por eso la fuente de verdad
+  de qué corre en PROD es `/api/health`, no la API de Deployments.)
 
 ## 3. Host único: el backend no se publica aparte
 
@@ -1653,6 +1657,17 @@ sí tuve fueron **cortes de red transitorios** entre algunos runners de GitHub
   desde otro runner, ya había pasado. Al re-correr, pasó.
 - En las corridas `37677961855` y `37840446131` (primer intento), el SSH del deploy dio
   `Connection timed out`, y en el firewall del VPS no quedó registrado ningún descarte.
+- En la corrida [`37850975213`](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37850975213)
+  (merge del PR #55, sólo documentación) saltó el paso previo nuevo de
+  `integracion`: mostró la IP del runner, `104.209.7.224`, el `curl` a QA dio
+  timeout las 6 veces y el job cortó en ~1,5 minutos (no a los 7 minutos de un
+  `page.goto` colgado) con el mensaje "corte de red entre GitHub y el VPS, no un
+  fallo de las pruebas". `e2e` y `deploy-prod` quedaron *skipped*. En el VPS
+  busqué esa IP: aparece **0 veces** en el `access.log` de nginx y **0 veces**
+  en los logs del kernel/UFW. Los paquetes nunca llegaron al servidor, así que
+  el corte está antes, en el proveedor o en la ruta, y no en mi firewall ni en
+  la app: confirma la hipótesis. No la re-corrí porque sólo cambiaba
+  documentación y re-correrla me habría vuelto a pedir aprobación para PROD.
 
 **Mitigaciones:**
 
@@ -1693,9 +1708,23 @@ entorno** van la dirección del backend, las credenciales de la base, el
 - **Aprobé** `37833222579` (después de re-correr por el corte de red, aclarando en
   el comentario que el primer intento falló por la red y no por la app) y
   `37840446131` (el arreglo del bug).
-- **`37841788683` (PR #54, el reintento del SSH) sigue esperando aprobación**, y
-  la voy a rechazar por el mismo motivo que la del PR #51: es un cambio sólo de
-  CI, y prefiero que PROD siga en `v7.0.0`. En QA sí está desplegado.
+- **`37841788683` (corrida #74, PR #54, el reintento del SSH) la aprobé por
+  error.** La quería rechazar por el mismo motivo que la del PR #51, y el
+  comentario lo dice ("…la imagen de la app es la misma que ya corre en PROD.
+  PROD queda en v7.0.0"), pero apreté *Approve*: la API de approvals la
+  registra como `approved`. PROD pasó a `51e774c`. El código de la app era el
+  mismo (sólo cambiaba la acción de deploy), pero se rompía "`v7.0.0` = lo que
+  corre en PROD".
+- **Lo corregí con el workflow de rollback:** corrida
+  [`37852840994`](https://github.com/ivanjalid1/ingsoft3-tp01/actions/runs/37852840994)
+  con el sha `b4630600…`. El job duró 45 s (22:21:29 → 22:22:14 UTC) y el
+  resumen mide **41 s** desde el inicio del rollback hasta el smoke verde. PROD
+  volvió a `b463060` = `v7.0.0` (`/api/health` lo confirma).
+- **La lección:** el gate registra el botón, no el comentario. Ya me había
+  pasado en el TP6 (punto 13 de esa sección), así que es un error humano que se
+  repite, no un accidente aislado. Una mitigación sería exigir un segundo
+  revisor o un *wait timer* en el environment `production`, para que un clic
+  equivocado no llegue directo a PROD.
 
 **Lo que el gate (con estas suites) no atrapa:** los flujos que no cubren las tres
 e2e, las regresiones visuales o de layout, la performance, los problemas de migración de
